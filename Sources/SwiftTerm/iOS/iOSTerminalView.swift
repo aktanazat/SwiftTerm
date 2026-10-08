@@ -267,10 +267,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var attributes: [Attribute: [NSAttributedString.Key:Any]] = [:]
     var urlAttributes: [Attribute: [NSAttributedString.Key:Any]] = [:]
 
-    /// Adjusts a foreground the program chose itself (256-color index 16 and up, or truecolor) given the
-    /// background the cell is drawn on, for example to keep text readable on a light theme. The 16 palette
-    /// colors and the default colors are never passed in. Setting it redraws with the new colors.
-    public var explicitForegroundAdjuster: ((_ foreground: UIColor, _ background: UIColor) -> UIColor)? {
+    /// Adjusts the color a cell's text is drawn in, given the background the cell is drawn on, for example
+    /// to keep every color readable against what it sits on. It sees the final color: default, palette,
+    /// 256-color and truecolor foregrounds alike, after dim (SGR 2) has blended them toward the background.
+    /// Setting it redraws with the new colors.
+    public var foregroundAdjuster: ((_ foreground: UIColor, _ background: UIColor) -> UIColor)? {
         didSet { colorsChanged() }
     }
 

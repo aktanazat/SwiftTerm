@@ -899,19 +899,13 @@ extension TerminalView {
         
         var fgColor = mapColor (color: fg, isFg: true, isBold: isBold, useBrightColors: useBrightColors)
         let bgColor = mapColor (color: bg, isFg: false, isBold: false)
-        if let adjust = explicitForegroundAdjuster {
-            switch fg {
-            case .ansi256(let code) where code >= 16:
-                fgColor = adjust (fgColor, bgColor)
-            case .trueColor:
-                fgColor = adjust (fgColor, bgColor)
-            default:
-                break
-            }
-        }
         // Apply dim/faint attribute (SGR 2)
         if flags.contains (.dim) {
             fgColor = fgColor.dimmedColor (towards: bgColor)
+        }
+        // The host sees the color the text will be drawn in, dim included.
+        if let adjust = foregroundAdjuster {
+            fgColor = adjust (fgColor, bgColor)
         }
         var nsattr: [NSAttributedString.Key:Any] = [
             .font: tf,
