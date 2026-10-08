@@ -18,6 +18,9 @@ import ImageIO
 import SwiftUI
 
 let SwiftTermUnderlineStyleKey = NSAttributedString.Key("SwiftTermUnderlineStyle")
+/// The color before `foregroundAdjuster` changed it. Block elements and Powerline separators draw in it:
+/// they are shapes that meet the cells around them, not text to read.
+let SwiftTermShapeForegroundKey = NSAttributedString.Key("SwiftTermShapeForeground")
 
 #if os(iOS) || os(visionOS)
 import UIKit
@@ -904,14 +907,22 @@ extension TerminalView {
             fgColor = fgColor.dimmedColor (towards: bgColor)
         }
         // The host sees the color the text will be drawn in, dim included.
+        var shapeColor: TTColor?
         if let adjust = foregroundAdjuster {
-            fgColor = adjust (fgColor, bgColor)
+            let adjusted = adjust (fgColor, bgColor)
+            if adjusted != fgColor {
+                shapeColor = fgColor
+            }
+            fgColor = adjusted
         }
         var nsattr: [NSAttributedString.Key:Any] = [
             .font: tf,
             .foregroundColor: fgColor,
             .backgroundColor: bgColor
         ]
+        if let shapeColor {
+            nsattr [SwiftTermShapeForegroundKey] = shapeColor
+        }
         if flags.contains (.underline) {
             let underlineColor = attribute.underlineColor.map {
                 mapColor(color: $0, isFg: true, isBold: isBold, useBrightColors: useBrightColors)
@@ -1153,6 +1164,7 @@ extension TerminalView {
                 if isSelected {
                     batchAttributes[.selectionBackgroundColor] = selectedTextBackgroundColor
                     batchAttributes[.foregroundColor] = selectedTextForegroundColor
+                    batchAttributes.removeValue(forKey: SwiftTermShapeForegroundKey)
                     if batchAttributes[.underlineColor] != nil {
                         batchAttributes[.underlineColor] = selectedTextForegroundColor
                     }
@@ -1189,7 +1201,8 @@ extension TerminalView {
             if !blinkHidden && PowerlineRenderer.shouldRender(codePoint: renderCodePoint,
                                               customGlyphsEnabled: customBlockGlyphs) {
                 flushPending()
-                let fgColor = (currentAttributes[.foregroundColor] as? TTColor) ?? effectiveNativeForegroundColor
+                let fgColor = (currentAttributes[SwiftTermShapeForegroundKey] as? TTColor)
+                    ?? (currentAttributes[.foregroundColor] as? TTColor) ?? effectiveNativeForegroundColor
                 powerlineGlyphs.append(PowerlineRenderItem(column: visualCol,
                                                            columnWidth: width,
                                                            codePoint: renderCodePoint,
@@ -1219,7 +1232,8 @@ extension TerminalView {
                        && renderCodePoint <= UInt32(BlockElementMapping.upperBoundary)),
                       let rects = BlockElementMapping.rects(for: renderCodePoint) {
                 flushPending()
-                let fgColor = (currentAttributes[.foregroundColor] as? TTColor) ?? effectiveNativeForegroundColor
+                let fgColor = (currentAttributes[SwiftTermShapeForegroundKey] as? TTColor)
+                    ?? (currentAttributes[.foregroundColor] as? TTColor) ?? effectiveNativeForegroundColor
                 blockElements.append(BlockElementRenderItem(column: visualCol,
                                                             columnWidth: width,
                                                             codePoint: renderCodePoint,

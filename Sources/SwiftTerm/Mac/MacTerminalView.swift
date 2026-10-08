@@ -325,7 +325,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Adjusts the color a cell's text is drawn in, given the background the cell is drawn on, for example
     /// to keep every color readable against what it sits on. It sees the final color: default, palette,
     /// 256-color and truecolor foregrounds alike, after dim (SGR 2) has blended them toward the background.
-    /// Setting it redraws with the new colors.
+    /// Block elements and Powerline separators keep the color from before it: they are shapes that meet the
+    /// cells around them. Setting it redraws with the new colors.
     public var foregroundAdjuster: ((_ foreground: NSColor, _ background: NSColor) -> NSColor)? {
         didSet { colorsChanged() }
     }
