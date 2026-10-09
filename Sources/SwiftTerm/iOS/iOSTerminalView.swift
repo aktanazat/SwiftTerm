@@ -511,6 +511,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if let metalLayer = mtkView.layer as? CAMetalLayer {
             metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
             metalLayer.isOpaque = backgroundOpacity >= 1.0
+            // Each drawable is a texture the size of the view. The renderer draws one frame at a time,
+            // so two hold the frame on screen and the one being drawn. A third would only let a frame
+            // start before the previous one reached the screen; that frame waits for the next refresh.
+            metalLayer.maximumDrawableCount = 2
         }
         return mtkView
     }

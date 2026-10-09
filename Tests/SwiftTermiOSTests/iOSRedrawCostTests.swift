@@ -87,5 +87,23 @@ struct iOSRedrawCostTests {
         }
         #expect(view.layoutNotices == 0)
     }
+
+    @Test func aTerminalHoldsAtMostTwoDrawables() throws {
+        let (view, window) = try makeFilledTerminal()
+        let metalView = try #require(view.metalView)
+        metalView.drawableSize = CGSize(width: 64, height: 64)
+        let layer = try #require(metalView.layer as? CAMetalLayer)
+        let first = layer.nextDrawable()
+        let second = layer.nextDrawable()
+        #expect(first != nil)
+        #expect(second != nil)
+        #expect(layer.maximumDrawableCount == 2)
+#if !targetEnvironment(simulator)
+        // With both held, a third would be one more texture the size of the view: the layer waits a
+        // second for one to come back, then gives up. The simulator hands out more than its layer allows.
+        #expect(layer.nextDrawable() == nil)
+#endif
+        withExtendedLifetime((first, second, window)) {}
+    }
 }
 #endif
