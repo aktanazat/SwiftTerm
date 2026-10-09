@@ -137,6 +137,14 @@ let targets: [Target] = [
             .copy("Fixtures/xterm-ghostty.infocmp"),
             .copy("Fixtures/swifterm-terminfo.infocmp")
         ]
+    ),
+    // The view tests that need UIKit and a Metal device. SwiftTermTests leans on HeadlessTerminal
+    // and AppKit, so it does not build for iOS; the SwiftTermiOSTests scheme builds this target
+    // alone: `xcodebuild test -scheme SwiftTermiOSTests -destination 'platform=iOS Simulator,...'`.
+    .testTarget(
+        name: "SwiftTermiOSTests",
+        dependencies: ["SwiftTerm"],
+        path: "Tests/SwiftTermiOSTests"
     )
 ] + benchmarkTargets + buildInfoTargets
 #endif
