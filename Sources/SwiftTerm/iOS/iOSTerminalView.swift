@@ -423,6 +423,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     deinit {
+        link?.invalidate()
         stopTextBlinking()
     }
 
@@ -692,8 +693,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     func setupDisplayUpdates ()
     {
-        link = CADisplayLink(target: self, selector: #selector(step))
-            
+        // The run loop holds the link and the link holds its target, so the target holds this view
+        // weakly: a view nothing else holds goes away, and its deinit takes the link off the run loop.
+        link = CADisplayLink(target: DisplayLinkTarget(view: self), selector: #selector(DisplayLinkTarget.step))
         link.add(to: .current, forMode: .default)
         suspendDisplayUpdates()
     }
@@ -3697,5 +3699,19 @@ extension TerminalView: UIAccessibilityReadingContent {
     }
 }
 #endif
+
+/// Passes a display link's refreshes to a terminal view without keeping the view alive.
+@MainActor
+private final class DisplayLinkTarget: NSObject {
+    weak var view: TerminalView?
+
+    init(view: TerminalView) {
+        self.view = view
+    }
+
+    @objc func step(_ link: CADisplayLink) {
+        view?.step(displaylink: link)
+    }
+}
 
 #endif
