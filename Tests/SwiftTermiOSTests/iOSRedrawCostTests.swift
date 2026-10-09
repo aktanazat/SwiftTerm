@@ -69,5 +69,23 @@ struct iOSRedrawCostTests {
         withExtendedLifetime(window) {}
     }
 #endif
+
+    /// Counts the layout notices the view would post, instead of posting them.
+    private final class NoticeCountingTerminalView: TerminalView {
+        var layoutNotices = 0
+        override func postAccessibilityLayoutChanged() {
+            layoutNotices += 1
+        }
+    }
+
+    @Test(.enabled(if: !UIAccessibility.isVoiceOverRunning && !UIAccessibility.isSwitchControlRunning))
+    func updatesPostNoLayoutNoticeWithoutVoiceOverOrSwitchControl() {
+        let view = NoticeCountingTerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+        for step in 1...5 {
+            view.feed(text: "\rstep \(step)")
+            view.updateDisplay()
+        }
+        #expect(view.layoutNotices == 0)
+    }
 }
 #endif

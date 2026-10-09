@@ -2480,7 +2480,12 @@ extension TerminalView {
         if (notifyAccessibility) {
             accessibility.invalidate ()
             #if os(iOS)
-            UIAccessibility.post(notification: .layoutChanged, argument: nil)
+            // VoiceOver and Switch Control are the readers of a layout change. With neither running the
+            // post has no reader, and it is not free while the accessibility runtime is loaded, as it is
+            // under UI tests.
+            if UIAccessibility.isVoiceOverRunning || UIAccessibility.isSwitchControlRunning {
+                postAccessibilityLayoutChanged()
+            }
             #endif
             #if os(macOS)
             NSAccessibility.post (element: self, notification: .valueChanged)

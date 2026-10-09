@@ -770,6 +770,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     {
         link.isPaused = true
     }
+
+    /// Tells VoiceOver and Switch Control that the screen changed.
+    func postAccessibilityLayoutChanged()
+    {
+        UIAccessibility.post(notification: .layoutChanged, argument: nil)
+    }
     
     public func updateUiClosed() {
         self.link.invalidate()
