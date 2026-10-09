@@ -244,7 +244,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 #if DEBUG
     private var debugFrameCount = 0
     private var debugLastLogTime = CFAbsoluteTimeGetCurrent()
-    private var debugRowsRebuilt = 0
+    /// Rows whose draw data the last frame built anew rather than took from the row cache.
+    private(set) var debugRowsRebuilt = 0
     private var debugRowsCached = 0
 #endif
 #if DEBUG

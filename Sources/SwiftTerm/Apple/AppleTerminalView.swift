@@ -2314,6 +2314,23 @@ extension TerminalView {
 #endif
     }
     
+    /// The buffer rows to draw again after the terminal changed screen rows `rowStart...rowEnd`: those
+    /// rows and every row whose bidi layout depends on them. Nil when the change lies outside the screen.
+    private func renderingDependencyRows(rowStart: Int, rowEnd: Int) -> ClosedRange<Int>? {
+        let displayBuffer = terminal.displayBuffer
+        guard !displayBuffer.lines.isEmpty,
+              rowStart >= 0, rowEnd >= rowStart, rowEnd < terminal.rows else {
+            return nil
+        }
+        let maxRow = displayBuffer.lines.count - 1
+        let absoluteStart = max(0, min(displayBuffer.yDisp + rowStart, maxRow))
+        let absoluteEnd = max(absoluteStart, min(displayBuffer.yDisp + rowEnd, maxRow))
+        return TerminalBidi.renderingDependencyRange(
+            rows: absoluteStart...absoluteEnd,
+            buffer: displayBuffer,
+            maximumRows: terminal.options.maximumBidiParagraphRows)
+    }
+
     /// Update visible area
     func updateDisplay (notifyAccessibility: Bool)
     {
@@ -2356,18 +2373,8 @@ extension TerminalView {
         let displayBuffer = terminal.displayBuffer
         var redrawStart = rowStart
         var redrawEnd = rowEnd
-        var absoluteDependencyRange: ClosedRange<Int>?
-        if !displayBuffer.lines.isEmpty,
-           rowStart >= 0, rowEnd >= rowStart, rowEnd < terminal.rows {
-            let maxRow = displayBuffer.lines.count - 1
-            let absoluteStart = max(0, min(displayBuffer.yDisp + rowStart, maxRow))
-            let absoluteEnd = max(absoluteStart,
-                                  min(displayBuffer.yDisp + rowEnd, maxRow))
-            let dependencies = TerminalBidi.renderingDependencyRange(
-                rows: absoluteStart...absoluteEnd,
-                buffer: displayBuffer,
-                maximumRows: terminal.options.maximumBidiParagraphRows)
-            absoluteDependencyRange = dependencies
+        let absoluteDependencyRange = renderingDependencyRows(rowStart: rowStart, rowEnd: rowEnd)
+        if let dependencies = absoluteDependencyRange {
             redrawStart = max(0, dependencies.lowerBound - displayBuffer.yDisp)
             redrawEnd = min(terminal.rows - 1,
                             dependencies.upperBound - displayBuffer.yDisp)
@@ -2447,11 +2454,16 @@ extension TerminalView {
         setNeedsDisplay(region)
 #endif
         #else
-        // TODO iOS: need to update the code above, but will do that when I get some real
-        // life data being fed into it.
         #if canImport(MetalKit)
         if metalView != nil {
-            metalDirtyRange = metalVisibleRange()
+            // Only the rows the update changed, and the rows whose bidi layout depends on them, need new
+            // draw data: the renderer keeps every other row, and rebuilds any row whose line changed.
+            // Rows an earlier update marked stay marked until a frame draws them.
+            if let rows = renderingDependencyRows(rowStart: rowStart, rowEnd: rowEnd) ?? metalVisibleRange() {
+                metalDirtyRange = metalDirtyRange.map {
+                    min($0.lowerBound, rows.lowerBound)...max($0.upperBound, rows.upperBound)
+                } ?? rows
+            }
             let buffer = terminal.displayBuffer
             lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
             requestMetalDisplay()
