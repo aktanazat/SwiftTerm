@@ -105,5 +105,35 @@ struct iOSRedrawCostTests {
 #endif
         withExtendedLifetime((first, second, window)) {}
     }
+
+    /// Counts the times the view starts its display link.
+    private final class LinkCountingTerminalView: TerminalView {
+        var linkStarts = 0
+        override func startDisplayUpdates() {
+            linkStarts += 1
+            super.startDisplayUpdates()
+        }
+    }
+
+    @Test func mainThreadFeedsLeaveTheDisplayLinkStopped() {
+        let view = LinkCountingTerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+        for chunk in 1...5 {
+            view.feed(text: "\rchunk \(chunk)")
+        }
+        #expect(view.linkStarts == 0)
+        #expect(view.link.isPaused)
+    }
+
+    @Test func aFeedOnAnotherThreadRunsTheDisplayLinkUntilItEnds() {
+        let view = LinkCountingTerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
+        let fed = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            view.feed(text: "\rchunk")
+            fed.signal()
+        }
+        fed.wait()
+        #expect(view.linkStarts == 1)
+        #expect(view.link.isPaused)
+    }
 }
 #endif

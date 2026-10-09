@@ -2783,12 +2783,18 @@ extension TerminalView {
         if allowMouseReporting {
             selection.active = false
         }
-        startDisplayUpdates()
+        // The display link shows a feed's progress while it runs on another thread. A feed on the main
+        // thread ends before the link could fire, and feedFinish schedules its display.
+        if !Thread.isMainThread {
+            startDisplayUpdates()
+        }
     }
     
     func feedFinish ()
     {
-        suspendDisplayUpdates ()
+        if !Thread.isMainThread {
+            suspendDisplayUpdates ()
+        }
         if shouldDisplayImmediatelyAfterUserInput() {
             displayImmediately()
             return
