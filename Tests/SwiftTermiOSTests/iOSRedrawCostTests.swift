@@ -78,7 +78,9 @@ struct iOSRedrawCostTests {
         }
     }
 
-    @Test(.enabled(if: !UIAccessibility.isVoiceOverRunning && !UIAccessibility.isSwitchControlRunning))
+    @Test(.enabled {
+        await MainActor.run { !UIAccessibility.isVoiceOverRunning && !UIAccessibility.isSwitchControlRunning }
+    })
     func updatesPostNoLayoutNoticeWithoutVoiceOverOrSwitchControl() {
         let view = NoticeCountingTerminalView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
         for step in 1...5 {
