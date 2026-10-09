@@ -265,10 +265,14 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             throw MetalError.commandQueueUnavailable
         }
         self.commandQueue = commandQueue
+        // Color glyphs (emoji) are rare on a terminal screen, so the color atlas
+        // starts at the smallest size, 256 KB, and grows when they come, instead
+        // of holding 4 MB from the start.
         guard let grayscaleAtlas = GlyphAtlas(device: device,
                                               maxSize: GlyphAtlas.recommendedMaxSize(device: device, format: .grayscale),
                                               format: .grayscale),
               let colorAtlas = GlyphAtlas(device: device,
+                                          size: 256,
                                           maxSize: GlyphAtlas.recommendedMaxSize(device: device, format: .bgra),
                                           format: .bgra) else {
             throw MetalError.atlasUnavailable
