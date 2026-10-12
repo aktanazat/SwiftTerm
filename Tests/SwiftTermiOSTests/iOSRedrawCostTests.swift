@@ -208,10 +208,12 @@ struct iOSRedrawCostTests {
 
 #if DEBUG
     /// What a frame did: how many rows it built anew, how many buffers it made for its rows' draw data,
-    /// the vertex bytes it handed the GPU, and the pixels it drew, when its view's frames copy them out.
+    /// how many attributed strings it made of its rows' text, the vertex bytes it handed the GPU, and the
+    /// pixels it drew, when its view's frames copy them out.
     struct DrawnFrame {
         var rowsRebuilt: Int
         var rowBuffersMade: Int
+        var attributedStringsBuilt: Int
         var vertices: FrameVertexBytes
         var pixels: FramePixels? = nil
     }
@@ -282,9 +284,13 @@ struct iOSRedrawCostTests {
     private func drawFrame(_ view: TerminalView) async throws -> DrawnFrame {
         let renderer = try #require(view.metalRenderer)
         try await waitUntil("an earlier frame never finished on the GPU") { renderer.isIdle }
+        // The count is shared by every view, so it starts from zero right before the frame, and every test
+        // that draws runs on the main actor, so nothing else runs before the frame is counted.
+        ViewLineSegment.debugAttributedStringsBuilt = 0
         try #require(view.metalView).draw()
         var frame = DrawnFrame(rowsRebuilt: renderer.debugRowsRebuilt,
                                rowBuffersMade: renderer.debugRowBuffersMade,
+                               attributedStringsBuilt: ViewLineSegment.debugAttributedStringsBuilt,
                                vertices: renderer.lastFrameVertexBytesForTesting())
         try await waitUntil("the frame never finished on the GPU") { renderer.isIdle }
         if renderer.capturesPixelsForTesting {
@@ -402,6 +408,14 @@ struct iOSRedrawCostTests {
                                                              printedLines: Int) async throws {
         let frame = try await drawFrameAfterStreaming(streaming, printedLines: printedLines)
         #expect(frame.rowBuffersMade == streaming.stream.linesWithText(printing: printedLines))
+    }
+
+    /// The frame after streaming output shapes the lines the output changed straight from the text and
+    /// attributes the line walk gathers, making no attributed string of them to take apart again.
+    @Test(arguments: StreamingCase.all, [1, 3])
+    func streamingOutputBuildsNoAttributedString(_ streaming: StreamingCase, printedLines: Int) async throws {
+        let frame = try await drawFrameAfterStreaming(streaming, printedLines: printedLines)
+        #expect(frame.attributedStringsBuilt == 0)
     }
 
     /// A frame that draws lines from the draw data the renderer kept hands the GPU the bytes the same

@@ -1756,25 +1756,16 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private func buildShapedSegments(_ segments: [ViewLineSegment], terminalView: TerminalView) -> [ShapedSegment] {
         var shapedSegments: [ShapedSegment] = []
         for segment in segments {
-            guard segment.attributedString.length > 0 else {
-                continue
-            }
-            let fullString = segment.attributedString.string as NSString
             var shapedRuns: [ShapedRun] = []
-            segment.attributedString.enumerateAttributes(in: NSRange(location: 0, length: segment.attributedString.length),
-                                                         options: []) { attributes, range, _ in
-                let text = fullString.substring(with: range)
-                guard !text.isEmpty else {
-                    return
-                }
-                let runFont = attributes[.font] as? TTFont ?? terminalView.fontSet.normal
+            for run in segment.runs {
+                let runFont = run.attributes[.font] as? TTFont ?? terminalView.fontSet.normal
                 let shapingFont = runFont as CTFont
-                guard let shaped = shaperCache.shape(text: text, font: shapingFont,
+                guard let shaped = shaperCache.shape(text: run.text, font: shapingFont,
                                                      fontName: postScriptName(of: shapingFont)) else {
-                    return
+                    continue
                 }
-                shapedRuns.append(ShapedRun(attributes: attributes,
-                                            utf16Offset: range.location,
+                shapedRuns.append(ShapedRun(attributes: run.attributes,
+                                            utf16Offset: run.utf16Offset,
                                             shaperRun: shaped))
             }
             if !shapedRuns.isEmpty {

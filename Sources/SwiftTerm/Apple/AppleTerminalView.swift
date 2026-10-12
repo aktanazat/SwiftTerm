@@ -65,20 +65,70 @@ public enum LinkHighlightMode {
 /// A rendered fragment that starts at a specific column and contains a run of
 /// characters that all occupy the same number of columns.
 struct ViewLineSegment {
+    /// Text the line walk added to the segment in one set of attributes. It is never empty.
+    struct Batch {
+        let text: String
+        let attributes: [NSAttributedString.Key: Any]
+    }
+
+    /// A stretch of the segment's text in one set of attributes, `utf16Offset` UTF-16 units into it.
+    struct Run {
+        let utf16Offset: Int
+        var text: String
+        let attributes: [NSAttributedString.Key: Any]
+    }
+
     let column: Int
     let columnWidth: Int
-    let characterCount: Int
-    let attributedString: NSAttributedString
-    /// Maps every UTF-16 unit of attributedString to the ordinal of the cell
+    /// The segment's text, in the order the line walk added it.
+    let batches: [Batch]
+    /// Maps every UTF-16 unit of the segment's text to the ordinal of the cell
     /// it belongs to, so glyphs can be positioned by cell (combining marks
     /// share their base's cell instead of shifting the column grid).
     let utf16ToCellOrdinal: [Int]
     /// True when every cell contributed exactly one UTF-16 unit, so the map
     /// is the identity and glyph index arithmetic can position runs directly.
     let utf16IsCellIdentity: Bool
+#if DEBUG
+    /// How many attributed strings segments have made of their text.
+    static var debugAttributedStringsBuilt = 0
+#endif
 
-    var columnSpan: Int {
-        return max(0, characterCount * columnWidth)
+    /// The segment's text in its attributes, made anew on each use, for CoreText to lay out as a line.
+    var attributedString: NSAttributedString {
+#if DEBUG
+        Self.debugAttributedStringsBuilt += 1
+#endif
+        let string = NSMutableAttributedString()
+        for batch in batches {
+            string.append(NSAttributedString(string: batch.text, attributes: batch.attributes))
+        }
+        return string
+    }
+
+    /// The runs enumerating the attributes of `attributedString` finds, without making it: an attributed
+    /// string holds neighboring batches in equal attributes as one run.
+    var runs: [Run] {
+        var runs: [Run] = []
+        var utf16Offset = 0
+        for batch in batches {
+            if let last = runs.last, Self.areEqual(last.attributes, batch.attributes) {
+                runs[runs.count - 1].text += batch.text
+            } else {
+                runs.append(Run(utf16Offset: utf16Offset, text: batch.text, attributes: batch.attributes))
+            }
+            utf16Offset += batch.text.utf16.count
+        }
+        return runs
+    }
+
+    /// Whether an attributed string holds two sets of attributes equal: the same keys, with values equal
+    /// by `isEqual(_:)`.
+    private static func areEqual(_ lhs: [NSAttributedString.Key: Any],
+                                 _ rhs: [NSAttributedString.Key: Any]) -> Bool {
+        lhs.count == rhs.count && lhs.allSatisfy { key, value in
+            rhs[key].map { (value as AnyObject).isEqual($0) } ?? false
+        }
     }
 
     @inline(__always)
@@ -1019,8 +1069,7 @@ extension TerminalView {
     fileprivate struct ViewLineSegmentBuilder {
         let column: Int
         let columnWidth: Int
-        private var attributedString = NSMutableAttributedString()
-        private var characterCount: Int = 0
+        private var batches: [ViewLineSegment.Batch] = []
         private var utf16ToCellOrdinal: [Int] = []
         private var cellCount: Int = 0
         private var utf16IsCellIdentity = true
@@ -1031,15 +1080,14 @@ extension TerminalView {
         }
         
         var isEmpty: Bool {
-            characterCount == 0
+            batches.isEmpty
         }
         
         /// Appends a batch of text; `cellUTF16Lengths` holds one entry per
         /// terminal cell in the batch (its text length in UTF-16 units).
         mutating func append(text: String, attributes: [NSAttributedString.Key: Any],
                              cellUTF16Lengths: [Int]) {
-            attributedString.append(NSAttributedString(string: text, attributes: attributes))
-            characterCount += 1
+            batches.append(ViewLineSegment.Batch(text: text, attributes: attributes))
             for length in cellUTF16Lengths {
                 let units = max(1, length)
                 if units != 1 {
@@ -1056,7 +1104,7 @@ extension TerminalView {
             guard !isEmpty else {
                 return nil
             }
-            return ViewLineSegment(column: column, columnWidth: columnWidth, characterCount: characterCount, attributedString: attributedString, utf16ToCellOrdinal: utf16ToCellOrdinal, utf16IsCellIdentity: utf16IsCellIdentity)
+            return ViewLineSegment(column: column, columnWidth: columnWidth, batches: batches, utf16ToCellOrdinal: utf16ToCellOrdinal, utf16IsCellIdentity: utf16IsCellIdentity)
         }
     }
     
@@ -1927,8 +1975,9 @@ extension TerminalView {
             // far more expensive than these keyed lookups.
             let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [PreparedRun])] =
                 lineInfo.segments.compactMap { segment in
-                    guard segment.attributedString.length > 0 else { return nil }
-                    let ctLine = cachedCTLine(segment.attributedString)
+                    let text = segment.attributedString
+                    guard text.length > 0 else { return nil }
+                    let ctLine = cachedCTLine(text)
                     guard let ctRuns = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
                     let runs = ctRuns.map { run -> PreparedRun in
                         // Toll-free cast: no per-entry bridging.
