@@ -248,6 +248,10 @@ internal class CircularBufferLineList {
     }
 
     private var _count: Int
+    /// How many times the list has changed which line sits at an index, other than by adding a line at its
+    /// end, dropping lines from its end, or making a line for an empty slot. A line at an index before such
+    /// a change may sit at another index after it, or have left the list.
+    private(set) var lineMoves = 0
     var maxLength: Int {
         didSet {
             if maxLength != oldValue {
@@ -310,6 +314,7 @@ internal class CircularBufferLineList {
         }
         set (newValue){
             array [getCyclicIndex(index)] = newValue
+            lineMoves += 1
             onLineAttached?(newValue)
       }
     }
@@ -319,6 +324,7 @@ internal class CircularBufferLineList {
         onLineAttached?(value)
         array [getCyclicIndex(count)] = value
         if count == array.count {
+            lineMoves += 1
             startIndex = startIndex + 1
             if startIndex == array.count {
                 startIndex = 0
@@ -332,6 +338,7 @@ internal class CircularBufferLineList {
     func recycle (clearAttribute: Attribute)
     {
         precondition(count == maxLength, "can only recycle when the buffer is full")
+        lineMoves += 1
         let index = getCyclicIndex(count)
         startIndex += 1
         startIndex = startIndex % maxLength
@@ -354,6 +361,7 @@ internal class CircularBufferLineList {
 
     func splice (start: Int, deleteCount: Int, items: [BufferLine], change: (Int) -> Void)
     {
+        lineMoves += 1
         if deleteCount > 0 {
             var i = start
             let limit = count-deleteCount
@@ -393,6 +401,7 @@ internal class CircularBufferLineList {
 
     func trimStart (count: Int)
     {
+        lineMoves += 1
         let c = count > self.count ? self.count : count
         startIndex = startIndex + c
         self.count -= count
@@ -417,6 +426,7 @@ internal class CircularBufferLineList {
         if start+offset <= 0 {
             return dumpState ("start+offset <= 0")
         }
+        lineMoves += 1
         if offset > 0 {
             for i in (0..<count).reversed() {
                 array[getCyclicIndex(start + i + offset)] = array[getCyclicIndex(start + i)]

@@ -516,8 +516,9 @@ open class Terminal {
     
     var refreshStart = Int.max
     var refreshEnd = -1
-    var scrollInvariantRefreshStart = Int.max
-    var scrollInvariantRefreshEnd = -1
+    /// Buffer rows to redraw, counted from the top of the scrollback rather than the screen, split where
+    /// the buffer's lines last moved.
+    var scrollInvariantMarks = BufferRowMarks()
     var userScrolling = false
     var lineFeedMode = false
     
@@ -6228,12 +6229,7 @@ open class Terminal {
         if !scrolling {
             let effectiveY = buffer._yDisp + y
             if effectiveY >= 0 {
-                if effectiveY < scrollInvariantRefreshStart {
-                    scrollInvariantRefreshStart = effectiveY
-                }
-                if effectiveY > scrollInvariantRefreshEnd {
-                    scrollInvariantRefreshEnd = effectiveY
-                }
+                scrollInvariantMarks.mark(effectiveY...effectiveY, lineMoves: buffer.lines.lineMoves)
             }
         }
         
@@ -6252,12 +6248,7 @@ open class Terminal {
         if !scrolling {
             let effectiveY = buffer._yDisp + y
             if effectiveY >= 0 {
-                if effectiveY < scrollInvariantRefreshStart {
-                    scrollInvariantRefreshStart = effectiveY
-                }
-                if effectiveY > scrollInvariantRefreshEnd {
-                    scrollInvariantRefreshEnd = effectiveY
-                }
+                scrollInvariantMarks.mark(effectiveY...effectiveY, lineMoves: buffer.lines.lineMoves)
             }
         }
 
@@ -6282,8 +6273,7 @@ open class Terminal {
         refreshStart = 0
         refreshEnd = rows
         
-        scrollInvariantRefreshStart = buffer.yDisp
-        scrollInvariantRefreshEnd = buffer.yDisp + rows
+        scrollInvariantMarks.mark(buffer.yDisp...buffer.yDisp + rows, lineMoves: buffer.lines.lineMoves)
     }
     
     /**
@@ -6350,12 +6340,21 @@ open class Terminal {
      */
     public func getScrollInvariantUpdateRange () -> (startY: Int, endY: Int)?
     {
-        if scrollInvariantRefreshEnd == -1 && scrollInvariantRefreshStart == Int.max {
-            //print ("Emtpy update range")
+        guard let rows = scrollInvariantMarks.allRows else {
             return nil
         }
-        //print ("Update: \(scrollInvariantRefreshStart) \(scrollInvariantRefreshEnd)")
-        return (scrollInvariantRefreshStart, scrollInvariantRefreshEnd)
+        return (rows.lowerBound, rows.upperBound)
+    }
+
+    /**
+     * Returns the rows getScrollInvariantUpdateRange() returns, split where the buffer's lines last
+     * moved to other rows.
+     */
+    func getScrollInvariantRowMarks () -> BufferRowMarks
+    {
+        var marks = scrollInvariantMarks
+        marks.noteLineMoves(buffer.lines.lineMoves)
+        return marks
     }
     
     /**
@@ -6366,8 +6365,7 @@ open class Terminal {
         refreshStart = Int.max
         refreshEnd = -1
         
-        scrollInvariantRefreshStart = Int.max
-        scrollInvariantRefreshEnd = -1
+        scrollInvariantMarks = BufferRowMarks()
     }
     
     /**

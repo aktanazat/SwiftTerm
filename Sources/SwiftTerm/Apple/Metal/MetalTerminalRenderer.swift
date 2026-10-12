@@ -942,13 +942,19 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
 
 #if os(iOS) || os(visionOS)
+        var rowMarks = terminalView.metalRowMarks
+        terminalView.metalRowMarks = BufferRowMarks()
+        // Lines that moved since the view last marked rows may have left the rows it marked.
+        rowMarks.noteLineMoves(buffer.lines.lineMoves)
         // The view marks every row for a selection change on a later turn of the main loop, so a frame
         // drawn before then builds every row itself.
-        let dirtyRange = terminalView.pendingSelectionChanged ? firstRow...lastRow : terminalView.metalDirtyRange
+        let dirtyRange = terminalView.pendingSelectionChanged ? firstRow...lastRow : rowMarks.beforeLinesMoved
+        let rowsMarkedSinceLinesMoved = rowMarks.sinceLinesMoved
 #else
         let dirtyRange = terminalView.metalDirtyRange
-#endif
         terminalView.metalDirtyRange = nil
+        let rowsMarkedSinceLinesMoved: ClosedRange<Int>? = nil
+#endif
         // The selection and a hovered link are drawn by buffer row, so while either shows, a line that
         // moved to another buffer row may have moved into or out of it.
         let highlightsFollowBufferRows = terminalView.selection?.active == true
@@ -984,6 +990,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             if let cached = rowCache[key],
                Self.canReuse(cached, at: row, placement: placement, generation: lineGeneration,
                              bidiParagraphRevision: bidiParagraphRevision, dirtyRange: dirtyRange,
+                             rowsMarkedSinceLinesMoved: rowsMarkedSinceLinesMoved,
                              highlightsFollowBufferRows: highlightsFollowBufferRows) {
                 entry = cached
                 cachedRows += 1
@@ -1041,13 +1048,16 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                         cursorGlyphVerticesColor: cursorData.glyphVerticesColor)
     }
 
-    /// Whether a line's cached draw data draws it at buffer row `row`, placed at `placement`.
+    /// Whether a line's cached draw data draws it at buffer row `row`, placed at `placement`. Rows in
+    /// `dirtyRange` were marked while they may have held other lines than they hold now; rows in
+    /// `rowsMarkedSinceLinesMoved` were marked holding the lines they hold now.
     private static func canReuse(_ cached: RowCacheEntry,
                                  at row: Int,
                                  placement: RowPlacement,
                                  generation: UInt64,
                                  bidiParagraphRevision: Int,
                                  dirtyRange: ClosedRange<Int>?,
+                                 rowsMarkedSinceLinesMoved: ClosedRange<Int>?,
                                  highlightsFollowBufferRows: Bool) -> Bool {
         // The line's text, attributes, and bidi layout are as they were when the data was built, and the
         // data sits the same fraction of a device pixel off the pixel grid.
@@ -1056,9 +1066,13 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
               cached.placement.localOriginY == placement.localOriginY else {
             return false
         }
-        // A row marked since then, at the line's old row, its new one, or a row it moved past between
-        // them, may draw differently.
+        // A row marked since the data was built, while it may have held another line, may have been
+        // marked for this line at its old row, its new one, or a row it moved past between them.
         if let dirtyRange, dirtyRange.overlaps(min(row, cached.row)...max(row, cached.row)) {
+            return false
+        }
+        // A row marked since the lines last moved was marked for the line on it now.
+        if let rowsMarkedSinceLinesMoved, rowsMarkedSinceLinesMoved.contains(row) {
             return false
         }
         // An image is placed by buffer row and on the pixel grid, so a row that draws one is built again

@@ -44,6 +44,9 @@ struct iOSRedrawCostTests {
         /// Lines printed over a status line at the bottom of the alternate screen, which is drawn again
         /// under them.
         case linesOverAStatusLineOnTheAlternateScreen
+        /// Lines tmux draws on the alternate screen: it scrolls the screen up as many rows as it has lines,
+        /// moves the cursor up onto its status line, and writes the lines and the status line again.
+        case linesAsTmuxDrawsThemOnTheAlternateScreen
         /// A newline at the bottom of a scroll region above a status line, as tmux scrolls.
         case regionAboveStatusLine
         /// A newline at the bottom of a scroll region between fixed lines, as vim scrolls.
@@ -69,7 +72,7 @@ struct iOSRedrawCostTests {
         var scrollback: Int? {
             switch self {
             case .newlineWithoutScrollback, .newlineInAFullScreenRegionOnTheAlternateScreen,
-                 .linesOverAStatusLineOnTheAlternateScreen: 0
+                 .linesOverAStatusLineOnTheAlternateScreen, .linesAsTmuxDrawsThemOnTheAlternateScreen: 0
             case .newline, .regionAboveStatusLine, .regionBetweenFixedLines, .reverseIndex, .insertLine,
                  .deleteLine, .scrollUp, .scrollDown, .scrollUpInARegionBetweenFixedLines,
                  .scrollDownInARegionBetweenFixedLines, .enterAlternateScreen, .leaveAlternateScreen: nil
@@ -83,6 +86,8 @@ struct iOSRedrawCostTests {
                 Scrollback.alternateScreen.setup(rows: rows) + "\u{1b}[1;\(rows)r\u{1b}[\(rows)H"
             case .linesOverAStatusLineOnTheAlternateScreen:
                 Scrollback.alternateScreen.setup(rows: rows) + "\r\nstatus 0"
+            case .linesAsTmuxDrawsThemOnTheAlternateScreen:
+                Scrollback.alternateScreen.setup(rows: rows) + LineStream.linesAsTmuxDrawsThem.setup(rows: rows)
             case .regionAboveStatusLine: "\u{1b}[1;\(rows - 1)r"
             case .regionBetweenFixedLines, .scrollUpInARegionBetweenFixedLines,
                  .scrollDownInARegionBetweenFixedLines: "\u{1b}[2;\(rows - 1)r"
@@ -97,6 +102,7 @@ struct iOSRedrawCostTests {
             switch self {
             case .newline, .newlineWithoutScrollback, .newlineInAFullScreenRegionOnTheAlternateScreen: "\r\n"
             case .linesOverAStatusLineOnTheAlternateScreen: "\r\u{1b}[2Koutput 1\r\noutput 2\r\nstatus 1"
+            case .linesAsTmuxDrawsThemOnTheAlternateScreen: LineStream.linesAsTmuxDrawsThem.output(printing: 4)
             case .regionAboveStatusLine, .regionBetweenFixedLines: "\u{1b}[\(rows - 1);1H\n"
             case .reverseIndex: "\u{1b}[H\u{1b}M"
             case .insertLine: "\u{1b}[3H\u{1b}[L"
@@ -151,6 +157,20 @@ struct iOSRedrawCostTests {
         /// Lines printed over a status line at the bottom, which is erased first and drawn again under
         /// them, as a tool streams its log under its status.
         case linesOverAStatusLine
+        /// The same in a tmux pane, as tmux 3.7 draws it in a scroll region the height of the screen: it
+        /// scrolls the screen up as many rows as it has lines in one command, moves the cursor up as far,
+        /// onto the status line, writes each line over what is left there, and writes the status line again
+        /// on the bottom row.
+        case linesAsTmuxDrawsThem
+
+        /// How many lines the cases print at once. tmux scrolled a build log in four or five lines at a
+        /// time.
+        var printedLineCounts: [Int] {
+            switch self {
+            case .lines, .linesInAFullScreenRegion, .linesOverAStatusLine: [1, 3]
+            case .linesAsTmuxDrawsThem: [4, 5]
+            }
+        }
 
         /// Output that leaves the cursor on a blank bottom row, or on the status line.
         func setup(rows: Int) -> String {
@@ -158,16 +178,26 @@ struct iOSRedrawCostTests {
             case .lines: "\r\n"
             case .linesInAFullScreenRegion: "\u{1b}[1;\(rows)r\u{1b}[\(rows)H\r\n"
             case .linesOverAStatusLine: "\r\nstatus 0"
+            case .linesAsTmuxDrawsThem: "\u{1b}[1;\(rows)r\u{1b}[\(rows)H\u{1b}[K" + Self.tmuxStatus(percent: 50)
             }
         }
 
         /// Output that prints `count` lines. It changes `count + 1` lines on screen: the lines printed, and
         /// the blank line under them or the status line drawn again.
         func output(printing count: Int) -> String {
-            let printed = (1...count).map { "output \($0)\r\n" }.joined()
             switch self {
-            case .lines, .linesInAFullScreenRegion: return printed
-            case .linesOverAStatusLine: return "\r\u{1b}[2K" + printed + "status 1"
+            case .lines, .linesInAFullScreenRegion:
+                return Self.printed(count)
+            case .linesOverAStatusLine:
+                return "\r\u{1b}[2K" + Self.printed(count) + "status 1"
+            case .linesAsTmuxDrawsThem:
+                // The bytes tmux sent, but for paths shortened to fit the screen.
+                let lines = (1...count).map { file in
+                    "\u{1b}[32mGenerating\u{1b}[39m \u{1b}[1mlhun-module-06\u{1b}(B\u{1b}[m v0.4.2 "
+                        + "(\u{1b}[2mSources/Module22/File\(file).swift\u{1b}(B\u{1b}[m)\u{1b}[K\r\n"
+                }
+                return "\u{1b}[?25l\u{1b}[?12l\u{1b}[?25h\r\u{1b}[\(count)S\u{1b}[\(count)A" + lines.joined()
+                    + "\u{1b}[K" + Self.tmuxStatus(percent: 51)
             }
         }
 
@@ -176,8 +206,16 @@ struct iOSRedrawCostTests {
         func linesWithText(printing count: Int) -> Int {
             switch self {
             case .lines, .linesInAFullScreenRegion: count
-            case .linesOverAStatusLine: count + 1
+            case .linesOverAStatusLine, .linesAsTmuxDrawsThem: count + 1
             }
+        }
+
+        private static func printed(_ count: Int) -> String {
+            (1...count).map { "output \($0)\r\n" }.joined()
+        }
+
+        private static func tmuxStatus(percent: Int) -> String {
+            "\u{1b}[36m\u{2839}\u{1b}[39m Building [ \(percent)%] 389 files"
         }
     }
 
@@ -186,8 +224,11 @@ struct iOSRedrawCostTests {
         var scrollback: Scrollback
         var stream: LineStream
 
-        static let all = Scrollback.allCases.flatMap { scrollback in
-            LineStream.allCases.map { StreamingCase(scrollback: scrollback, stream: $0) }
+        /// Every scrollback with every stream, paired with each number of lines the stream prints at once.
+        static let all: [(StreamingCase, Int)] = Scrollback.allCases.flatMap { scrollback in
+            LineStream.allCases.flatMap { stream in
+                stream.printedLineCounts.map { (StreamingCase(scrollback: scrollback, stream: stream), $0) }
+            }
         }
     }
 
@@ -205,6 +246,19 @@ struct iOSRedrawCostTests {
             case .scrollDown: "\u{1b}[\(count)T"
             }
         }
+    }
+
+    /// When the view takes in the blink timer's marks, and output that then scrolls the screen, before a
+    /// frame draws them.
+    enum BlinkThenScroll: CaseIterable, Sendable {
+        /// A scroll up command moves the blinking line up four rows, as tmux scrolls a pane, and the view
+        /// takes in the blink and the scroll in one update.
+        case scrollUpInTheBlinksUpdate
+        /// The view takes in the blink in an update of its own, then a newline moves the line up a row,
+        /// and the view takes that in before the frame.
+        case newlineInTheNextUpdate
+        /// The same, but the frame draws before the view takes in the newline.
+        case newlineBeforeTheNextUpdate
     }
 
     /// A terminal drawing with Metal in a window, every row of its screen holding text, and
@@ -391,7 +445,7 @@ struct iOSRedrawCostTests {
         // What the blink timer does: hide the blinking text and mark its rows, then update.
         view.setTextBlinkVisibleForTesting(false)
         view.updateDisplay(notifyAccessibility: false)
-        #expect(view.metalDirtyRange == lastRow...lastRow)
+        #expect(view.metalRowMarks.allRows == lastRow...lastRow)
         let blinkFrame = try await drawFrame(view)
         #expect(blinkFrame.rowsRebuilt == 1)
         withExtendedLifetime(window) {}
@@ -408,23 +462,22 @@ struct iOSRedrawCostTests {
         view.updateDisplay()
         _ = try await drawFrame(view)
         let buffer = view.getTerminal().displayBuffer
-        let topLine = buffer.lines[try #require(view.metalVisibleRange()).lowerBound]
+        let topLine = buffer.lines[buffer.yBase]
 
         view.feed(text: streaming.stream.output(printing: printedLines))
         view.updateDisplay()
-        let topRow = try #require(view.metalVisibleRange()).lowerBound
-        try #require(buffer.lines[topRow] !== topLine, "the output did not scroll the screen")
+        try #require(buffer.lines[buffer.yBase] !== topLine, "the output did not scroll the screen")
         let frame = try await drawFrame(view)
         withExtendedLifetime(window) {}
         return frame
     }
 
     /// Output streaming past the bottom of the screen, as a build log does, moves every line on the
-    /// screen up a row for each line it prints. The frame after it builds the lines the output changed
-    /// and keeps every other line's draw data, whatever scrollback the terminal keeps, on the alternate
-    /// screen, inside a scroll region the height of the screen, and under a status line the output draws
-    /// again.
-    @Test(arguments: StreamingCase.all, [1, 3])
+    /// screen up a row for each line it prints, or, under tmux, all its lines' rows at once. The frame
+    /// after it builds the lines the output changed and keeps every other line's draw data, whatever
+    /// scrollback the terminal keeps, on the alternate screen, inside a scroll region the height of the
+    /// screen, and under a status line the output draws again.
+    @Test(arguments: StreamingCase.all)
     func streamingOutputBuildsOnlyTheLinesItChanges(_ streaming: StreamingCase, printedLines: Int) async throws {
         let frame = try await drawFrameAfterStreaming(streaming, printedLines: printedLines)
         #expect(frame.rowsRebuilt == printedLines + 1)
@@ -433,7 +486,7 @@ struct iOSRedrawCostTests {
     /// A line that streaming output only moved up the screen draws from the buffers it had, wherever it
     /// moved to, so the frame after the output makes buffers for the lines it changed alone: one for the
     /// glyphs of each line that holds text, and none for a blank line.
-    @Test(arguments: StreamingCase.all, [1, 3])
+    @Test(arguments: StreamingCase.all)
     func streamingOutputMakesBuffersOnlyForTheLinesItChanges(_ streaming: StreamingCase,
                                                              printedLines: Int) async throws {
         let frame = try await drawFrameAfterStreaming(streaming, printedLines: printedLines)
@@ -442,7 +495,7 @@ struct iOSRedrawCostTests {
 
     /// The frame after streaming output shapes the lines the output changed straight from the text and
     /// attributes the line walk gathers, making no attributed string of them to take apart again.
-    @Test(arguments: StreamingCase.all, [1, 3])
+    @Test(arguments: StreamingCase.all)
     func streamingOutputBuildsNoAttributedString(_ streaming: StreamingCase, printedLines: Int) async throws {
         let frame = try await drawFrameAfterStreaming(streaming, printedLines: printedLines)
         #expect(frame.attributedStringsBuilt == 0)
@@ -595,6 +648,45 @@ struct iOSRedrawCostTests {
         view.textBlinkTimer = blinkTimer
         view.feed(text: "\r\n")
         view.updateDisplay()
+        let (cached, rebuilt) = try await drawCachedThenRebuilt(view)
+        #expect(cached.vertices.rows == rebuilt.vertices.rows)
+        try expectSamePixels(cached, rebuilt)
+        withExtendedLifetime(window) {}
+    }
+
+    /// The blink timer hides blinking text on the alternate screen and marks the row it is on, and output
+    /// then moves the line off that row. Whether the view takes in the blink and the output in one update
+    /// or in two, or draws before it takes in the output, the frame draws the text hidden, as a frame
+    /// built from scratch draws it.
+    @Test(arguments: Layout.all, BlinkThenScroll.allCases)
+    func aBlinkBeforeAScrollDrawsWhatARebuildDraws(layout: Layout, order: BlinkThenScroll) async throws {
+        let scrollback = Scrollback.alternateScreen
+        let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, scrollback: scrollback.lines,
+                                                    layout: layout)
+        try capturePixels(of: view)
+        view.feed(text: scrollback.setup(rows: view.getTerminal().rows) + "\r\u{1b}[5mblink\u{1b}[25m")
+        view.updateDisplay()
+        // Stop the view's blink timer, and keep the view from starting another, so only the test shows
+        // and hides the text.
+        let blinkTimer = try #require(view.textBlinkTimer, "the view started no blink timer")
+        blinkTimer.invalidate()
+        _ = try await drawFrame(view)
+
+        view.setTextBlinkVisibleForTesting(false)
+        view.textBlinkTimer = blinkTimer
+        switch order {
+        case .scrollUpInTheBlinksUpdate:
+            view.feed(text: "\u{1b}[4S")
+            view.updateDisplay()
+        case .newlineInTheNextUpdate:
+            view.updateDisplay()
+            view.feed(text: "\r\n")
+            view.updateDisplay()
+        case .newlineBeforeTheNextUpdate:
+            view.updateDisplay()
+            view.feed(text: "\r\n")
+            try #require(view.getTerminal().getUpdateRange() != nil, "the view took in the newline before the frame")
+        }
         let (cached, rebuilt) = try await drawCachedThenRebuilt(view)
         #expect(cached.vertices.rows == rebuilt.vertices.rows)
         try expectSamePixels(cached, rebuilt)

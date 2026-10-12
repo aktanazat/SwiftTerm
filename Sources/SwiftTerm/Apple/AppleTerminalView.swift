@@ -2428,7 +2428,7 @@ extension TerminalView {
         #if !os(macOS) && canImport(MetalKit)
         // The buffer rows output changed, leaving out rows marked only because the screen scrolled.
         // Read before clearUpdateRange clears it.
-        let changedBufferRows = terminal.getScrollInvariantUpdateRange()
+        let changedBufferRows = terminal.getScrollInvariantRowMarks()
         #endif
         terminal.clearUpdateRange ()
 
@@ -2523,16 +2523,21 @@ extension TerminalView {
             // draw data. The renderer keeps every other line's draw data wherever a scroll moves the line,
             // and rebuilds any line that changed, so a scroll alone marks no row. An update reaching past
             // the screen marks every row on it. Rows an earlier update marked stay marked until a frame
-            // draws them.
-            let changedRows = rowEnd < terminal.rows
-                ? changedBufferRows.flatMap { renderingDependencyRows(bufferRows: $0.startY...$0.endY) }
-                : metalVisibleRange()
-            if let rows = changedRows {
-                metalDirtyRange = metalDirtyRange.map {
-                    min($0.lowerBound, rows.lowerBound)...max($0.upperBound, rows.upperBound)
-                } ?? rows
-            }
+            // draws them, and rows marked before the buffer's lines last moved stay apart from rows
+            // marked since, which name the lines on them now.
             let buffer = terminal.displayBuffer
+            if rowEnd < terminal.rows {
+                if let rows = changedBufferRows.beforeLinesMoved,
+                   let dependencies = renderingDependencyRows(bufferRows: rows) {
+                    metalRowMarks.markBeforeLinesMoved(dependencies)
+                }
+                if let rows = changedBufferRows.sinceLinesMoved,
+                   let dependencies = renderingDependencyRows(bufferRows: rows) {
+                    metalRowMarks.mark(dependencies, lineMoves: changedBufferRows.lineMoves)
+                }
+            } else if let rows = metalVisibleRange() {
+                metalRowMarks.mark(rows, lineMoves: buffer.lines.lineMoves)
+            }
             lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
             requestMetalDisplay()
         } else {

@@ -232,7 +232,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         presentedFrameCount: 0,
         lastFramePresentedAt: nil
     )
-    var metalDirtyRange: ClosedRange<Int>?
+    /// Buffer rows marked for new draw data that no frame has drawn yet, split where the buffer's lines
+    /// last moved to other rows.
+    var metalRowMarks = BufferRowMarks()
     /// The cursor position last submitted to the Metal renderer. Used to
     /// detect pure cursor-only moves (no rows dirty) such as the
     /// CSI Ps C / CSI Ps D sequences shells emit in response to Option+Arrow
@@ -3362,7 +3364,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
  
 #if canImport(MetalKit)
             if self.metalView != nil {
-                self.metalDirtyRange = self.metalVisibleRange()
+                if let rows = self.metalVisibleRange() {
+                    self.metalRowMarks.mark(rows, lineMoves: self.terminal.displayBuffer.lines.lineMoves)
+                }
                 self.queueMetalDisplay()
             } else {
                 self.setNeedsDisplay(self.bounds)
