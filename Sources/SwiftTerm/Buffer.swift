@@ -774,7 +774,9 @@ public final class Buffer {
     
     public func resize (newCols : Int, newRows : Int)
     {
-        if marginRight > newCols - 1 {
+        // Margins the width of the screen stay the width of the screen, as the scroll region below
+        // stays its height. Left at the old width, a screen that grew would scroll only its old columns.
+        if marginRight == cols - 1 || marginRight > newCols - 1 {
             marginRight = newCols - 1
         }
         if marginLeft >= marginRight {

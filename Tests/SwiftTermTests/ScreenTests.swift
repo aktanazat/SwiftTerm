@@ -430,6 +430,20 @@ final class ScreenTests {
         TerminalTestHarness.assertLineText(terminal.buffer, row: 3, equals: " HI7")
     }
 
+    /// Margins the width of the screen grow with it, so with margin mode on, as tmux keeps it, a scroll
+    /// after the screen widens moves the whole of every line, the new columns too.
+    @Test func testScrollUpWithMarginModeMovesWholeLinesAfterTheScreenWidens() {
+        let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 4, rows: 3, scrollback: 0)
+        terminal.resize(cols: 8, rows: 3)
+        terminal.feed(text: "\(esc)[?69h")
+        terminal.feed(text: "ABCDEFGH\r\nIJKLMNOP\r\nQRSTUVWX")
+        terminal.feed(text: "\(esc)[1S")
+
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 0, equals: "IJKLMNOP")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 1, equals: "QRSTUVWX")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 2, equals: "")
+    }
+
     @Test func testScrollDownOnAlternateBufferUsesFullWidthByDefault() {
         let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 4, rows: 4, scrollback: 0)
         terminal.feed(text: "\(esc)[?1049h")

@@ -160,7 +160,8 @@ struct iOSRedrawCostTests {
         /// The same in a tmux pane, as tmux 3.7 draws it in a scroll region the height of the screen: it
         /// scrolls the screen up as many rows as it has lines in one command, moves the cursor up as far,
         /// onto the status line, writes each line over what is left there, and writes the status line again
-        /// on the bottom row.
+        /// on the bottom row. Margin mode is on, with the margins the width of the screen, as tmux turns it
+        /// on for a terminal that reports horizontal scrolling, as SwiftTerm does.
         case linesAsTmuxDrawsThem
 
         /// How many lines the cases print at once. tmux scrolled a build log in four or five lines at a
@@ -178,7 +179,8 @@ struct iOSRedrawCostTests {
             case .lines: "\r\n"
             case .linesInAFullScreenRegion: "\u{1b}[1;\(rows)r\u{1b}[\(rows)H\r\n"
             case .linesOverAStatusLine: "\r\nstatus 0"
-            case .linesAsTmuxDrawsThem: "\u{1b}[1;\(rows)r\u{1b}[\(rows)H\u{1b}[K" + Self.tmuxStatus(percent: 50)
+            case .linesAsTmuxDrawsThem:
+                "\u{1b}[?69h\u{1b}[1;\(rows)r\u{1b}[\(rows)H\u{1b}[K" + Self.tmuxStatus(percent: 50)
             }
         }
 
@@ -238,12 +240,19 @@ struct iOSRedrawCostTests {
         case scrollUp
         /// Scroll down, which moves the lines down and brings blank lines in at the top.
         case scrollDown
+        /// Scroll up with margin mode on and the margins the width of the screen, as tmux scrolls a pane
+        /// on a terminal that reports horizontal scrolling, as SwiftTerm does.
+        case scrollUpWithMarginsTheWidthOfTheScreen
+        /// The same, scrolling down.
+        case scrollDownWithMarginsTheWidthOfTheScreen
 
         /// The command that scrolls `count` lines.
         func output(scrolling count: Int) -> String {
             switch self {
             case .scrollUp: "\u{1b}[\(count)S"
             case .scrollDown: "\u{1b}[\(count)T"
+            case .scrollUpWithMarginsTheWidthOfTheScreen: "\u{1b}[?69h\u{1b}[\(count)S"
+            case .scrollDownWithMarginsTheWidthOfTheScreen: "\u{1b}[?69h\u{1b}[\(count)T"
             }
         }
     }

@@ -751,6 +751,14 @@ open class Terminal {
     {
         return originMode && marginMode
     }
+
+    /// Whether the left and right margins leave columns of the screen out. Margins the width of the
+    /// screen scroll whole lines, as with margin mode off: tmux turns margin mode on for a terminal that
+    /// reports horizontal scrolling, as this one does, and keeps the margins that wide but for panes
+    /// side by side.
+    var hasNarrowMargins: Bool {
+        marginMode && (buffer.marginLeft > 0 || buffer.marginRight < cols - 1)
+    }
     
     /// Returns the terminal dimensions 1-based values
     public func getDims () -> (cols: Int,rows: Int)
@@ -3382,7 +3390,7 @@ open class Terminal {
         let scrollBottomAbsolute = rows - 1 + buffer.yBase - scrollBottomRowsOffset + 1
         
         let ea = eraseAttr ()
-        if marginMode {
+        if hasNarrowMargins {
             if buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight {
                 let columnCount = buffer.marginRight-buffer.marginLeft+1
                 let rowCount = buffer.scrollBottom-buffer.scrollTop
@@ -5867,7 +5875,7 @@ open class Terminal {
         let p = min (max (pars.count == 0 ? 1 : pars [0], 1), rows)
         let da = CharData.defaultAttr
 
-        if marginMode {
+        if hasNarrowMargins {
             let row = buffer.scrollTop + buffer.yBase
 
             let columnCount = buffer.marginRight-buffer.marginLeft+1
@@ -5902,7 +5910,7 @@ open class Terminal {
         hardenBidiScrollBoundaries(insertedAtTop: true, count: p)
         // this.maxRange();
         refreshScrolledRegion(top: buffer.scrollTop, bottom: buffer.scrollBottom, canBlit: false,
-                              linesOnlyMoved: !marginMode)
+                              linesOnlyMoved: !hasNarrowMargins)
     }
 
     //
@@ -5913,7 +5921,7 @@ open class Terminal {
         let p = min (rows*2, max (pars.count == 0 ? 1 : pars [0], 1))
         let da = CharData.defaultAttr
 
-        if marginMode {
+        if hasNarrowMargins {
             let row = buffer.scrollTop + buffer.yBase
 
             let columnCount = buffer.marginRight-buffer.marginLeft+1
@@ -5948,7 +5956,7 @@ open class Terminal {
         hardenBidiScrollBoundaries(insertedAtTop: false, count: p)
         // this.maxRange();
         refreshScrolledRegion(top: buffer.scrollTop, bottom: buffer.scrollBottom, canBlit: false,
-                              linesOnlyMoved: !marginMode)
+                              linesOnlyMoved: !hasNarrowMargins)
     }
 
     private func hardenBidiScrollBoundaries(insertedAtTop: Bool, count: Int) {
@@ -6031,7 +6039,7 @@ open class Terminal {
         j = rows - 1 + buffer.yBase - j
         let ea = eraseAttr ()
         
-        if marginMode {
+        if hasNarrowMargins {
             if buffer.x >= buffer.marginLeft && buffer.x <= buffer.marginRight {
                 let columnCount = buffer.marginRight-buffer.marginLeft+1
                 let rowCount = buffer.scrollBottom-buffer.scrollTop
@@ -6530,7 +6538,7 @@ open class Terminal {
         // we cannot use scrollback (can't push partial lines), so we do in-place scrolling
         // within the margin columns only. This path is unconditional when narrow margins are
         // active, regardless of cursor position, to ensure consistent behavior.
-        let hasNarrowMargins = marginMode && (bMarginLeft > 0 || bMarginRight < cols - 1)
+
         // Set when the scroll recycles the buffer's top line as its new bottom line.
         var recycledTopLine = false
         if hasNarrowMargins {
@@ -7059,8 +7067,6 @@ open class Terminal {
                     print ("reverseIndex: start index \(topRow) >= lines.count \(buffer.lines.count), state: y=\(buffer.y) yBase=\(buffer.yBase) scrollTop=\(buffer.scrollTop) scrollBottom=\(buffer.scrollBottom) isAlternate=\(isCurrentBufferAlternate)")
                     return
                 }
-
-                let hasNarrowMargins = marginMode && (buffer.marginLeft > 0 || buffer.marginRight < cols - 1)
 
                 if hasNarrowMargins {
                     // Do in-place reverse scrolling within margin columns only
