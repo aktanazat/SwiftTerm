@@ -38,6 +38,12 @@ struct iOSRedrawCostTests {
         case newline
         /// The same with no scrollback, so the top line is cleared and comes back in at the bottom.
         case newlineWithoutScrollback
+        /// A newline at the bottom of a scroll region the height of the alternate screen, which keeps no
+        /// scrollback, as tmux scrolls a pane.
+        case newlineInAFullScreenRegionOnTheAlternateScreen
+        /// Lines printed over a status line at the bottom of the alternate screen, which is drawn again
+        /// under them.
+        case linesOverAStatusLineOnTheAlternateScreen
         /// A newline at the bottom of a scroll region above a status line, as tmux scrolls.
         case regionAboveStatusLine
         /// A newline at the bottom of a scroll region between fixed lines, as vim scrolls.
@@ -53,12 +59,21 @@ struct iOSRedrawCostTests {
 
         /// The scrollback the terminal keeps, or nil for the default.
         var scrollback: Int? {
-            self == .newlineWithoutScrollback ? 0 : nil
+            switch self {
+            case .newlineWithoutScrollback, .newlineInAFullScreenRegionOnTheAlternateScreen,
+                 .linesOverAStatusLineOnTheAlternateScreen: 0
+            case .newline, .regionAboveStatusLine, .regionBetweenFixedLines, .reverseIndex, .insertLine,
+                 .deleteLine, .enterAlternateScreen, .leaveAlternateScreen: nil
+            }
         }
 
         /// Output that sets up a screen of `rows` rows for the change.
         func setup(rows: Int) -> String {
             switch self {
+            case .newlineInAFullScreenRegionOnTheAlternateScreen:
+                Scrollback.alternateScreen.setup(rows: rows) + "\u{1b}[1;\(rows)r\u{1b}[\(rows)H"
+            case .linesOverAStatusLineOnTheAlternateScreen:
+                Scrollback.alternateScreen.setup(rows: rows) + "\r\nstatus 0"
             case .regionAboveStatusLine: "\u{1b}[1;\(rows - 1)r"
             case .regionBetweenFixedLines: "\u{1b}[2;\(rows - 1)r"
             case .leaveAlternateScreen: "\u{1b}[?1049h\u{1b}[Halternate screen"
@@ -70,7 +85,8 @@ struct iOSRedrawCostTests {
         /// The output that makes the change on a screen of `rows` rows.
         func output(rows: Int) -> String {
             switch self {
-            case .newline, .newlineWithoutScrollback: "\r\n"
+            case .newline, .newlineWithoutScrollback, .newlineInAFullScreenRegionOnTheAlternateScreen: "\r\n"
+            case .linesOverAStatusLineOnTheAlternateScreen: "\r\u{1b}[2Koutput 1\r\noutput 2\r\nstatus 1"
             case .regionAboveStatusLine, .regionBetweenFixedLines: "\u{1b}[\(rows - 1);1H\n"
             case .reverseIndex: "\u{1b}[H\u{1b}M"
             case .insertLine: "\u{1b}[3H\u{1b}[L"
@@ -78,6 +94,77 @@ struct iOSRedrawCostTests {
             case .enterAlternateScreen: "\u{1b}[?1049h\u{1b}[Halternate screen"
             case .leaveAlternateScreen: "\u{1b}[?1049l"
             }
+        }
+    }
+
+    /// The scrollback a streaming test's terminal keeps.
+    enum Scrollback: CaseIterable, Sendable {
+        /// The default, still filling.
+        case growing
+        /// Full, so it drops its oldest line for each new one.
+        case full
+        /// None, as Lhûn's terminals keep, so each new line reuses the line that scrolled off the top.
+        case absent
+        /// The alternate screen, which never keeps scrollback, as tmux keeps the terminal on it, in a
+        /// terminal that keeps none on its normal screen either.
+        case alternateScreen
+
+        var lines: Int? {
+            switch self {
+            case .growing: nil
+            case .full: 3
+            case .absent, .alternateScreen: 0
+            }
+        }
+
+        /// Output that fills the screen the case streams into, a line of text in every row, and leaves the
+        /// cursor at the end of the bottom row.
+        func setup(rows: Int) -> String {
+            switch self {
+            case .growing, .full, .absent: ""
+            case .alternateScreen:
+                "\u{1b}[?1049h\u{1b}[H" + (1...rows).map { "alternate \($0)" }.joined(separator: "\r\n")
+            }
+        }
+    }
+
+    /// Output streaming lines past the bottom of the screen.
+    enum LineStream: CaseIterable, Sendable {
+        /// Lines, each ended with a newline, as a build log prints them.
+        case lines
+        /// The same inside a scroll region the height of the screen, as tmux sets one.
+        case linesInAFullScreenRegion
+        /// Lines printed over a status line at the bottom, which is erased first and drawn again under
+        /// them, as a tool streams its log under its status.
+        case linesOverAStatusLine
+
+        /// Output that leaves the cursor on a blank bottom row, or on the status line.
+        func setup(rows: Int) -> String {
+            switch self {
+            case .lines: "\r\n"
+            case .linesInAFullScreenRegion: "\u{1b}[1;\(rows)r\u{1b}[\(rows)H\r\n"
+            case .linesOverAStatusLine: "\r\nstatus 0"
+            }
+        }
+
+        /// Output that prints `count` lines. It changes `count + 1` lines on screen: the lines printed, and
+        /// the blank line under them or the status line drawn again.
+        func output(printing count: Int) -> String {
+            let printed = (1...count).map { "output \($0)\r\n" }.joined()
+            switch self {
+            case .lines, .linesInAFullScreenRegion: return printed
+            case .linesOverAStatusLine: return "\r\u{1b}[2K" + printed + "status 1"
+            }
+        }
+    }
+
+    /// A scrollback, and output streaming into it.
+    struct StreamingCase: Sendable {
+        var scrollback: Scrollback
+        var stream: LineStream
+
+        static let all = Scrollback.allCases.flatMap { scrollback in
+            LineStream.allCases.map { StreamingCase(scrollback: scrollback, stream: $0) }
         }
     }
 
@@ -180,21 +267,23 @@ struct iOSRedrawCostTests {
     }
 
     /// Output streaming past the bottom of the screen, as a build log does, moves every line on the
-    /// screen up a row for each line it prints. The frame after it builds the lines printed and the blank
-    /// line under them, and keeps every other line's draw data, whether the scrollback still grows or is
-    /// full and drops its oldest line for each new one.
-    @Test(arguments: [false, true], [1, 3])
-    func streamingOutputBuildsOnlyTheLinesItPrints(scrollbackFull: Bool, printedLines: Int) async throws {
+    /// screen up a row for each line it prints. The frame after it builds the lines the output changed
+    /// and keeps every other line's draw data, whatever scrollback the terminal keeps, on the alternate
+    /// screen, inside a scroll region the height of the screen, and under a status line the output draws
+    /// again.
+    @Test(arguments: StreamingCase.all, [1, 3])
+    func streamingOutputBuildsOnlyTheLinesItChanges(_ streaming: StreamingCase, printedLines: Int) async throws {
         let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5,
-                                                    scrollback: scrollbackFull ? 3 : nil,
+                                                    scrollback: streaming.scrollback.lines,
                                                     layout: Layout(height: .partialRow, aggregated: false))
-        view.feed(text: "\r\n")
+        let rows = view.getTerminal().rows
+        view.feed(text: streaming.scrollback.setup(rows: rows) + streaming.stream.setup(rows: rows))
         view.updateDisplay()
         _ = try await drawFrame(view)
         let buffer = view.getTerminal().displayBuffer
         let topLine = buffer.lines[try #require(view.metalVisibleRange()).lowerBound]
 
-        view.feed(text: (1...printedLines).map { "output \($0)\r\n" }.joined())
+        view.feed(text: streaming.stream.output(printing: printedLines))
         view.updateDisplay()
         let topRow = try #require(view.metalVisibleRange()).lowerBound
         try #require(buffer.lines[topRow] !== topLine, "the output did not scroll the screen")
@@ -282,12 +371,14 @@ struct iOSRedrawCostTests {
     }
 
     /// The blink timer hides blinking text and marks the rows it is on. Output that scrolls a full
-    /// scrollback before the next frame moves the line up a buffer row, off the row marked for it, and
-    /// that frame draws the text hidden, as a frame built from scratch draws it.
-    @Test(arguments: Layout.all)
-    func aBlinkMarkedBeforeAScrollDrawsWhatARebuildDraws(layout: Layout) async throws {
-        let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, scrollback: 3, layout: layout)
-        view.feed(text: "\r\u{1b}[5mblink\u{1b}[25m")
+    /// scrollback, or the alternate screen, which keeps none, before the next frame moves the line up a
+    /// buffer row, off the row marked for it, and that frame draws the text hidden, as a frame built from
+    /// scratch draws it.
+    @Test(arguments: Layout.all, [Scrollback.full, .alternateScreen])
+    func aBlinkMarkedBeforeAScrollDrawsWhatARebuildDraws(layout: Layout, scrollback: Scrollback) async throws {
+        let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, scrollback: scrollback.lines,
+                                                    layout: layout)
+        view.feed(text: scrollback.setup(rows: view.getTerminal().rows) + "\r\u{1b}[5mblink\u{1b}[25m")
         view.updateDisplay()
         // Stop the view's blink timer, and keep the view from starting another, so only the test shows
         // and hides the text.

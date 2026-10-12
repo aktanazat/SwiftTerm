@@ -6484,9 +6484,15 @@ open class Terminal {
     /// dirtied region before painting (see AppleTerminalView), so flagging just
     /// [top, bottom] fixes the stale rows / bottom ghost — no whole-viewport repaint
     /// needed. Full-screen + scrollback (`canBlit`) keeps the cheap path.
-    private func refreshScrolledRegion(top: Int, bottom: Int, canBlit: Bool) {
+    ///
+    /// `linesOnlyMoved` says the scroll recycled the buffer's top line: every other line
+    /// moved up a buffer row unchanged, and the recycled line came back cleared at the
+    /// bottom, as when a full scrollback drops its oldest line. Then the region is flagged
+    /// on screen only, and the scroll-invariant range keeps just the rows output changed,
+    /// as it does when a full scrollback drops a line.
+    private func refreshScrolledRegion(top: Int, bottom: Int, canBlit: Bool, linesOnlyMoved: Bool = false) {
         if top != 0 || bottom != rows - 1 || !canBlit {
-            updateRange(startLine: top, endLine: bottom)
+            updateRange(startLine: top, endLine: bottom, scrolling: linesOnlyMoved)
         }
     }
 
@@ -6521,6 +6527,8 @@ open class Terminal {
         // within the margin columns only. This path is unconditional when narrow margins are
         // active, regardless of cursor position, to ensure consistent behavior.
         let hasNarrowMargins = marginMode && (bMarginLeft > 0 || bMarginRight < cols - 1)
+        // Set when the scroll recycles the buffer's top line as its new bottom line.
+        var recycledTopLine = false
         if hasNarrowMargins {
             let scrollRegionHeight = bottomRow - topRow + 1
             let columnCount = bMarginRight - bMarginLeft + 1
@@ -6568,6 +6576,7 @@ open class Terminal {
                     lines.recycle (clearAttribute: eraseAttr())
                     lines[lines.count - 1].isWrapped = isWrapped
                     lines[lines.count - 1].bidiState = newLineState
+                    recycledTopLine = true
                 } else {
                     lines.push (BufferLine (from: newLine))
                 }
@@ -6634,7 +6643,8 @@ open class Terminal {
         updateRange (scrollTop, scrolling: true)
         updateRange (scrollBottom, scrolling: true)
 
-        refreshScrolledRegion(top: scrollTop, bottom: scrollBottom, canBlit: hasScrollback)
+        refreshScrolledRegion(top: scrollTop, bottom: scrollBottom, canBlit: hasScrollback,
+                              linesOnlyMoved: recycledTopLine)
 
         if buffer.hasAnyImages {
             updateKittyRelativePlacementsForCurrentBuffer()
