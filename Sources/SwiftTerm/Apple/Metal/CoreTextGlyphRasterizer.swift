@@ -5,11 +5,20 @@ import CoreText
 final class CoreTextGlyphRasterizer {
     var fontSmoothing: Bool = true
 
-    func rasterize(font: CTFont, glyph: CGGlyph) -> GlyphBitmap? {
+    /// What rasterizing a glyph gives.
+    enum Rasterized {
+        /// The glyph's pixels.
+        case bitmap(GlyphBitmap)
+        /// Nothing to draw: the glyph has no ink, as a space has none.
+        case blank
+    }
+
+    /// Rasterizes `glyph`, or returns nil when no bitmap context could be made for it.
+    func rasterize(font: CTFont, glyph: CGGlyph) -> Rasterized? {
         var glyphVar = glyph
         let rect = CTFontGetBoundingRectsForGlyphs(font, .default, &glyphVar, nil, 1)
         if rect.width <= 0 || rect.height <= 0 {
-            return nil
+            return .blank
         }
 
         let minX = floor(rect.origin.x)
@@ -19,7 +28,7 @@ final class CoreTextGlyphRasterizer {
         let width = Int(maxX - minX)
         let height = Int(maxY - minY)
         if width <= 0 || height <= 0 {
-            return nil
+            return .blank
         }
 
         let bytesPerPixel = 4
@@ -80,11 +89,11 @@ final class CoreTextGlyphRasterizer {
             idx += 4
         }
 
-        return GlyphBitmap(width: width,
-                           height: height,
-                           bearing: CGPoint(x: minX, y: minY),
-                           pixels: pixels,
-                           isColor: isColor)
+        return .bitmap(GlyphBitmap(width: width,
+                                   height: height,
+                                   bearing: CGPoint(x: minX, y: minY),
+                                   pixels: pixels,
+                                   isColor: isColor))
     }
 }
 #endif

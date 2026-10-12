@@ -249,6 +249,24 @@ struct iOSRedrawCostTests {
         withExtendedLifetime(window) {}
     }
 
+    /// A glyph is rasterized once, a glyph with no ink such as a space included, and a font's name is
+    /// copied out of it once. Building the same screen again, as a frame after the row cache is dropped
+    /// does, rasterizes no glyph and copies no font name.
+    @Test func rebuildingAScreenRasterizesNoGlyphAndCopiesNoFontName() async throws {
+        let (view, window) = try makeFilledTerminal()
+        let renderer = try #require(view.metalRenderer)
+        _ = try await drawFrame(view)
+        try #require(renderer.debugGlyphsRasterized > 0, "the first frame rasterized no glyph")
+        try #require(renderer.debugFontNamesCopied > 0, "the first frame copied no font name")
+
+        renderer.debugGlyphsRasterized = 0
+        renderer.debugFontNamesCopied = 0
+        _ = try await drawCachedThenRebuilt(view)
+        #expect(renderer.debugGlyphsRasterized == 0)
+        #expect(renderer.debugFontNamesCopied == 0)
+        withExtendedLifetime(window) {}
+    }
+
     /// Blinking changes how a row draws without changing its text, so only the row marked for it shows it.
     @Test func blinkRedrawsTheBlinkingRowAlone() async throws {
         let (view, window) = try makeFilledTerminal()

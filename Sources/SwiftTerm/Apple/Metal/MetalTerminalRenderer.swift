@@ -279,7 +279,16 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private let grayscaleAtlas: GlyphAtlas
     private let colorAtlas: GlyphAtlas
     private let rasterizer = CoreTextGlyphRasterizer()
-    private var glyphCache: [GlyphKey: GlyphEntry] = [:]
+    /// A glyph the atlas holds, or one that draws nothing, such as a space, remembered so it is not
+    /// rasterized again.
+    private enum CachedGlyph {
+        case drawn(GlyphEntry)
+        case blank
+    }
+    private var glyphCache: [GlyphKey: CachedGlyph] = [:]
+    /// Each font's PostScript name, by font object. An entry holds its font, so the identifier cannot
+    /// come to name another font while the entry lives.
+    private var fontNames: [ObjectIdentifier: (font: CTFont, name: String)] = [:]
     private var scaledFontCache: [GlyphKey: CTFont] = [:]
     private var customGlyphCache: [CustomGlyphKey: CustomGlyphEntry] = [:]
     private let imageTextureCache = NSMapTable<AnyObject, MTLTexture>(keyOptions: .weakMemory, valueOptions: .strongMemory)
@@ -324,6 +333,11 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     /// Rows whose draw data the last frame built anew rather than took from the row cache.
     private(set) var debugRowsRebuilt = 0
     private var debugRowsCached = 0
+    /// Glyphs rasterized since a test last set this to zero. A frame builds its rows again when the glyph
+    /// atlas grows during the build, so the count runs across builds.
+    var debugGlyphsRasterized = 0
+    /// Font names copied out of a font since a test last set this to zero.
+    var debugFontNamesCopied = 0
     /// What the last frame handed the GPU, for tests that compare frames.
     private var debugLastDrawData: DrawData?
 #endif
@@ -1695,7 +1709,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                     return
                 }
                 let runFont = attributes[.font] as? TTFont ?? terminalView.fontSet.normal
-                guard let shaped = shaperCache.shape(text: text, font: runFont as CTFont) else {
+                let shapingFont = runFont as CTFont
+                guard let shaped = shaperCache.shape(text: text, font: shapingFont,
+                                                     fontName: postScriptName(of: shapingFont)) else {
                     return
                 }
                 shapedRuns.append(ShapedRun(attributes: attributes,
@@ -1727,14 +1743,46 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    /// The PostScript name glyphs, scaled fonts, and shaped runs are cached under. Copying a name out of
+    /// a font allocates, and a frame looks up every glyph it draws by it, so each font object's name is
+    /// copied once and remembered with the font.
+    private func postScriptName(of font: CTFont) -> String {
+        let id = ObjectIdentifier(font)
+        if let known = fontNames[id] {
+            return known.name
+        }
+#if DEBUG
+        debugFontNamesCopied += 1
+#endif
+        let name = CTFontCopyPostScriptName(font) as String
+        // Fonts that shaping falls back to come and go; start over rather than hold every one.
+        if fontNames.count >= 256 {
+            fontNames.removeAll(keepingCapacity: true)
+        }
+        fontNames[id] = (font, name)
+        return name
+    }
+
     private func glyphEntry(for font: CTFont, glyph: CGGlyph) -> GlyphEntry? {
-        let key = GlyphKey(fontName: CTFontCopyPostScriptName(font) as String,
+        let key = GlyphKey(fontName: postScriptName(of: font),
                            size: CTFontGetSize(font),
                            glyph: glyph)
-        if let cached = glyphCache[key] {
-            return cached
+        switch glyphCache[key] {
+        case .drawn(let entry)?:
+            return entry
+        case .blank?:
+            return nil
+        case nil:
+            break
         }
-        guard let bitmap = rasterizer.rasterize(font: font, glyph: glyph) else {
+#if DEBUG
+        debugGlyphsRasterized += 1
+#endif
+        guard let rasterized = rasterizer.rasterize(font: font, glyph: glyph) else {
+            return nil
+        }
+        guard case .bitmap(let bitmap) = rasterized else {
+            glyphCache[key] = .blank
             return nil
         }
         let atlasKind: GlyphAtlasKind = bitmap.isColor ? .color : .grayscale
@@ -1751,12 +1799,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                bearing: bitmap.bearing,
                                isColor: bitmap.isColor,
                                atlasKind: atlasKind)
-        glyphCache[key] = entry
+        glyphCache[key] = .drawn(entry)
         return entry
     }
 
     private func scaledFontFor(font: CTFont, scale: CGFloat) -> CTFont {
-        let key = GlyphKey(fontName: CTFontCopyPostScriptName(font) as String,
+        let key = GlyphKey(fontName: postScriptName(of: font),
                            size: CTFontGetSize(font) * scale,
                            glyph: 0)
         if let cached = scaledFontCache[key] {
@@ -2111,11 +2159,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             self.maxEntries = maxEntries
         }
 
-        func shape(text: String, font: CTFont) -> ShaperRun? {
+        /// Shapes `text` in `font`, whose PostScript name is `fontName`.
+        func shape(text: String, font: CTFont, fontName: String) -> ShaperRun? {
             guard !text.isEmpty else {
                 return nil
             }
-            let key = ShaperKey(fontName: CTFontCopyPostScriptName(font) as String,
+            let key = ShaperKey(fontName: fontName,
                                 fontSize: CTFontGetSize(font),
                                 text: text)
             if let cached = cache[key] {
