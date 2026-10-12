@@ -2317,14 +2317,23 @@ extension TerminalView {
     /// The buffer rows to draw again after the terminal changed screen rows `rowStart...rowEnd`: those
     /// rows and every row whose bidi layout depends on them. Nil when the change lies outside the screen.
     private func renderingDependencyRows(rowStart: Int, rowEnd: Int) -> ClosedRange<Int>? {
+        guard rowStart >= 0, rowEnd >= rowStart, rowEnd < terminal.rows else {
+            return nil
+        }
+        let yDisp = terminal.displayBuffer.yDisp
+        return renderingDependencyRows(bufferRows: yDisp + rowStart...yDisp + rowEnd)
+    }
+
+    /// The buffer rows to draw again after the terminal changed buffer rows `bufferRows`: those rows and
+    /// every row whose bidi layout depends on them.
+    private func renderingDependencyRows(bufferRows: ClosedRange<Int>) -> ClosedRange<Int>? {
         let displayBuffer = terminal.displayBuffer
-        guard !displayBuffer.lines.isEmpty,
-              rowStart >= 0, rowEnd >= rowStart, rowEnd < terminal.rows else {
+        guard !displayBuffer.lines.isEmpty else {
             return nil
         }
         let maxRow = displayBuffer.lines.count - 1
-        let absoluteStart = max(0, min(displayBuffer.yDisp + rowStart, maxRow))
-        let absoluteEnd = max(absoluteStart, min(displayBuffer.yDisp + rowEnd, maxRow))
+        let absoluteStart = max(0, min(bufferRows.lowerBound, maxRow))
+        let absoluteEnd = max(absoluteStart, min(bufferRows.upperBound, maxRow))
         return TerminalBidi.renderingDependencyRange(
             rows: absoluteStart...absoluteEnd,
             buffer: displayBuffer,
@@ -2367,6 +2376,11 @@ extension TerminalView {
             terminalDelegate?.rangeChanged (source: self, startY: rowStart, endY: rowEnd)
         }
 
+        #if !os(macOS) && canImport(MetalKit)
+        // The buffer rows output changed, leaving out rows marked only because the screen scrolled.
+        // Read before clearUpdateRange clears it.
+        let changedBufferRows = terminal.getScrollInvariantUpdateRange()
+        #endif
         terminal.clearUpdateRange ()
 
         #if os(macOS)
@@ -2456,10 +2470,15 @@ extension TerminalView {
         #else
         #if canImport(MetalKit)
         if metalView != nil {
-            // Only the rows the update changed, and the rows whose bidi layout depends on them, need new
-            // draw data: the renderer keeps every other row, and rebuilds any row whose line changed.
-            // Rows an earlier update marked stay marked until a frame draws them.
-            if let rows = renderingDependencyRows(rowStart: rowStart, rowEnd: rowEnd) ?? metalVisibleRange() {
+            // Only the rows output changed, and the rows whose bidi layout depends on them, need new
+            // draw data. The renderer keeps every other line's draw data wherever a scroll moves the line,
+            // and rebuilds any line that changed, so a scroll alone marks no row. An update reaching past
+            // the screen marks every row on it. Rows an earlier update marked stay marked until a frame
+            // draws them.
+            let changedRows = rowEnd < terminal.rows
+                ? changedBufferRows.flatMap { renderingDependencyRows(bufferRows: $0.startY...$0.endY) }
+                : metalVisibleRange()
+            if let rows = changedRows {
                 metalDirtyRange = metalDirtyRange.map {
                     min($0.lowerBound, rows.lowerBound)...max($0.upperBound, rows.upperBound)
                 } ?? rows
