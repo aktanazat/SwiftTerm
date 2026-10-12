@@ -127,6 +127,12 @@ struct RowDrawBuffers {
     var otherImageBuffers: [ImageDrawBuffer]
 }
 
+/// A row's buffers, and how many whole device pixels up the view a frame draws them.
+struct PlacedRowBuffers {
+    let buffers: RowDrawBuffers
+    let shiftPx: Float
+}
+
 /// Where a frame draws a row. The row's draw data is built with its bottom edge `localOriginY` points
 /// above the bottom of the view, less than a device pixel, and drawn `shiftPx` whole device pixels further
 /// up, so the same draw data draws its line at any row a scroll moves it to, to the bit.
@@ -152,7 +158,9 @@ struct RowCacheEntry {
     /// Where that frame drew it.
     var placement: RowPlacement
     var data: RowDrawData
-    /// The row's draw data in buffers, placed by `placement`, when frames keep buffers for each row.
+    /// The row's draw data in buffers, when frames keep buffers for each row. They hold the data as it was
+    /// built, and a frame has the GPU move them up the view to the row's placement, so they serve wherever
+    /// the row moves for as long as the data does.
     var buffers: RowDrawBuffers?
 }
 
@@ -182,7 +190,7 @@ struct FrameDrawData {
 }
 
 struct DrawData {
-    var rows: [RowDrawBuffers]
+    var rows: [PlacedRowBuffers]
     var frame: FrameDrawData?
     var cursorColorVertices: [ColorVertex]
     var cursorGlyphVerticesGray: [GlyphVertex]
@@ -192,8 +200,9 @@ struct DrawData {
 #if DEBUG
 /// The bytes of one frame's vertex data, as the GPU reads them.
 struct FrameVertexBytes: Equatable {
-    /// The rows' draw data: an entry for each kind of cell and for each image draw, row by row, or for
-    /// the whole frame when the frame gathers its rows into one set of buffers.
+    /// The rows' draw data: an entry for each kind of cell and for each image draw, then one for the shift
+    /// the GPU moves them up the view by, row by row; or the entries for the whole frame when the frame
+    /// gathers its rows into one set of buffers.
     var rows: [[UInt8]] = []
     /// The cursor's vertices, an entry for each kind.
     var cursor: [[UInt8]] = []
@@ -333,6 +342,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     /// Rows whose draw data the last frame built anew rather than took from the row cache.
     private(set) var debugRowsRebuilt = 0
     private var debugRowsCached = 0
+    /// Buffers the last frame made for the draw data of its rows.
+    private(set) var debugRowBuffersMade = 0
     /// Glyphs rasterized since a test last set this to zero. A frame builds its rows again when the glyph
     /// atlas grows during the build, so the count runs across builds.
     var debugGlyphsRasterized = 0
@@ -340,6 +351,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     var debugFontNamesCopied = 0
     /// What the last frame handed the GPU, for tests that compare frames.
     private var debugLastDrawData: DrawData?
+    /// Whether each frame copies the pixels it draws out of its drawable, for `lastFramePixelsForTesting`.
+    /// The view's drawables must not be framebuffer-only.
+    var capturesPixelsForTesting = false
+    private var debugLastFramePixels: (buffer: MTLBuffer, width: Int)?
 #endif
 #if DEBUG
     private var imageTextureFailures: Set<ObjectIdentifier> = []
@@ -457,7 +472,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         guard let drawData = debugLastDrawData else {
             return bytes
         }
-        for row in drawData.rows {
+        for placed in drawData.rows {
+            let row = placed.buffers
             bytes.rows.append(Self.bytes(of: row.backgroundBuffer, count: row.backgroundCount, as: ColorCell.self))
             bytes.rows.append(Self.bytes(of: row.powerlineJoinBuffer, count: row.powerlineJoinCount, as: ColorCell.self))
             bytes.rows.append(Self.bytes(of: row.glyphGrayBuffer, count: row.glyphGrayCount, as: TextCell.self))
@@ -466,6 +482,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             for image in row.underImageBuffers + row.placeholderImageBuffers + row.overImageBuffers + row.otherImageBuffers {
                 bytes.rows.append(Self.bytes(of: image.buffer, count: image.vertexCount, as: GlyphVertex.self))
             }
+            bytes.rows.append(Self.bytes(of: [placed.shiftPx]))
         }
         if let frame = drawData.frame {
             bytes.rows.append(Self.bytes(of: frame.backgroundCells))
@@ -498,6 +515,37 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
     private static func bytes<T>(of items: [T]) -> [UInt8] {
         items.withUnsafeBytes { Array($0) }
+    }
+
+    /// The pixels the last frame drew, row by row and four bytes each, once the GPU has finished the frame,
+    /// and how many pixels make a row.
+    func lastFramePixelsForTesting() -> (bytes: [UInt8], width: Int)? {
+        guard let (pixels, width) = debugLastFramePixels else {
+            return nil
+        }
+        return (Array(UnsafeRawBufferPointer(start: pixels.contents(), count: pixels.length)), width)
+    }
+
+    /// A buffer the GPU copies `texture` into after the passes `commandBuffer` encoded so far.
+    private func copyPixels(of texture: MTLTexture, commandBuffer: MTLCommandBuffer) -> MTLBuffer? {
+        let bytesPerRow = texture.width * 4
+        let length = bytesPerRow * texture.height
+        guard length > 0,
+              let pixels = device.makeBuffer(length: length, options: .storageModeShared),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            return nil
+        }
+        blit.copy(from: texture,
+                  sourceSlice: 0,
+                  sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+                  to: pixels,
+                  destinationOffset: 0,
+                  destinationBytesPerRow: bytesPerRow,
+                  destinationBytesPerImage: length)
+        blit.endEncoding()
+        return pixels
     }
 #endif
 
@@ -725,6 +773,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 var viewportVar = viewport
                 encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                Self.setRowShift(0, encoder: encoder)
                 encoder.setFragmentTexture(grayscaleAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesGray.count)
@@ -737,6 +786,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 0)
                 var viewportVar = viewport
                 encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+                Self.setRowShift(0, encoder: encoder)
                 encoder.setFragmentTexture(colorAtlas.texture, index: 0)
                 encoder.setFragmentSamplerState(sampler, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: drawData.cursorGlyphVerticesColor.count)
@@ -744,6 +794,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
 
         encoder.endEncoding()
+#if DEBUG
+        if capturesPixelsForTesting {
+            debugLastFramePixels = copyPixels(of: drawable.texture, commandBuffer: commandBuffer)
+                .map { ($0, drawable.texture.width) }
+        }
+#endif
 #if canImport(os)
         if MetalTerminalRenderer.profileEnabled {
             os_signpost(.end, log: MetalTerminalRenderer.profileLog, name: "Metal.Encode", signpostID: encodeID)
@@ -818,6 +874,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     }
 
     private func buildDrawDataPass(scale: CGFloat) -> DrawData {
+#if DEBUG
+        debugRowBuffersMade = 0
+#endif
         guard let terminalView = terminalView else {
 #if DEBUG
             debugRowsRebuilt = 0
@@ -895,7 +954,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         let highlightsFollowBufferRows = terminalView.selection?.active == true
             || terminalView.linkHighlightRange != nil
 
-        var rows: [RowDrawBuffers] = []
+        var rows: [PlacedRowBuffers] = []
         var frameData: FrameDrawData? = bufferingMode == .perFrameAggregated ? FrameDrawData() : nil
         let isAltBuffer = terminalView.terminal.isCurrentBufferAlternate
         var virtualPlacementsByImageId: [UInt32: [KittyPlacementRecord]] = [:]
@@ -946,13 +1005,13 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             switch bufferingMode {
             case .perRowPersistent:
                 let buffers: RowDrawBuffers
-                if let placed = entry.buffers, entry.placement.shiftPx == placement.shiftPx {
-                    buffers = placed
+                if let kept = entry.buffers {
+                    buffers = kept
                 } else {
-                    buffers = makeRowBuffers(from: entry.data, shiftPx: placement.shiftPx)
+                    buffers = makeRowBuffers(from: entry.data)
                     entry.buffers = buffers
                 }
-                rows.append(buffers)
+                rows.append(PlacedRowBuffers(buffers: buffers, shiftPx: placement.shiftPx))
             case .perFrameAggregated:
                 frameData?.append(entry.data, movedBy: placement.shiftPx)
             }
@@ -2274,28 +2333,29 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return bufferPool.makeBuffer(vertices)
     }
 
-    /// A buffer holding `items` moved `shiftPx` device pixels up the view.
-    private func makePlacedBuffer<T: RowPlaced>(_ items: [T], shiftPx: Float) -> (MTLBuffer?, Int) {
+    /// A buffer holding a row's `items`, which frames keep for as long as the row's draw data lasts.
+    private func makeRowBuffer<T>(_ items: [T]) -> (MTLBuffer?, Int) {
         let count = items.count
         guard count > 0,
-              let buffer = device.makeBuffer(length: count * MemoryLayout<T>.stride, options: .storageModeShared) else {
+              let buffer = items.withUnsafeBytes({ bytes in
+                  device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+              }) else {
             return (nil, 0)
         }
-        let placed = buffer.contents().bindMemory(to: T.self, capacity: count)
-        for (index, item) in items.enumerated() {
-            (placed + index).initialize(to: item.moved(by: shiftPx))
-        }
+#if DEBUG
+        debugRowBuffersMade += 1
+#endif
         return (buffer, count)
     }
 
-    private func makeImageDrawBuffers(_ draws: [ImageDraw], shiftPx: Float) -> [ImageDrawBuffer] {
+    private func makeImageDrawBuffers(_ draws: [ImageDraw]) -> [ImageDrawBuffer] {
         guard !draws.isEmpty else {
             return []
         }
         var result: [ImageDrawBuffer] = []
         result.reserveCapacity(draws.count)
         for draw in draws {
-            let (buffer, count) = makePlacedBuffer(draw.vertices, shiftPx: shiftPx)
+            let (buffer, count) = makeRowBuffer(draw.vertices)
             guard let buffer, count > 0 else {
                 continue
             }
@@ -2304,13 +2364,13 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return result
     }
 
-    /// Buffers holding a row's draw data moved `shiftPx` device pixels up the view.
-    private func makeRowBuffers(from data: RowDrawData, shiftPx: Float) -> RowDrawBuffers {
-        let (backgroundBuffer, backgroundCount) = makePlacedBuffer(data.backgroundCells, shiftPx: shiftPx)
-        let (powerlineJoinBuffer, powerlineJoinCount) = makePlacedBuffer(data.powerlineJoinCells, shiftPx: shiftPx)
-        let (glyphGrayBuffer, glyphGrayCount) = makePlacedBuffer(data.glyphCellsGray, shiftPx: shiftPx)
-        let (glyphColorBuffer, glyphColorCount) = makePlacedBuffer(data.glyphCellsColor, shiftPx: shiftPx)
-        let (decorationBuffer, decorationCount) = makePlacedBuffer(data.decorationCells, shiftPx: shiftPx)
+    /// Buffers holding a row's draw data.
+    private func makeRowBuffers(from data: RowDrawData) -> RowDrawBuffers {
+        let (backgroundBuffer, backgroundCount) = makeRowBuffer(data.backgroundCells)
+        let (powerlineJoinBuffer, powerlineJoinCount) = makeRowBuffer(data.powerlineJoinCells)
+        let (glyphGrayBuffer, glyphGrayCount) = makeRowBuffer(data.glyphCellsGray)
+        let (glyphColorBuffer, glyphColorCount) = makeRowBuffer(data.glyphCellsColor)
+        let (decorationBuffer, decorationCount) = makeRowBuffer(data.decorationCells)
         return RowDrawBuffers(backgroundBuffer: backgroundBuffer,
                               backgroundCount: backgroundCount,
                               powerlineJoinBuffer: powerlineJoinBuffer,
@@ -2321,10 +2381,18 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               glyphColorCount: glyphColorCount,
                               decorationBuffer: decorationBuffer,
                               decorationCount: decorationCount,
-                              underImageBuffers: makeImageDrawBuffers(data.underImageDraws, shiftPx: shiftPx),
-                              placeholderImageBuffers: makeImageDrawBuffers(data.placeholderImageDraws, shiftPx: shiftPx),
-                              overImageBuffers: makeImageDrawBuffers(data.overImageDraws, shiftPx: shiftPx),
-                              otherImageBuffers: makeImageDrawBuffers(data.otherImageDraws, shiftPx: shiftPx))
+                              underImageBuffers: makeImageDrawBuffers(data.underImageDraws),
+                              placeholderImageBuffers: makeImageDrawBuffers(data.placeholderImageDraws),
+                              overImageBuffers: makeImageDrawBuffers(data.overImageDraws),
+                              otherImageBuffers: makeImageDrawBuffers(data.otherImageDraws))
+    }
+
+    /// Has the draws the encoder makes next move their vertices `shiftPx` device pixels up the view: the
+    /// whole pixels between where a row's draw data was built and the row a frame draws it at, or zero for
+    /// vertices in place already.
+    private static func setRowShift(_ shiftPx: Float, encoder: MTLRenderCommandEncoder) {
+        var shift = shiftPx
+        encoder.setVertexBytes(&shift, length: MemoryLayout<Float>.stride, index: 2)
     }
 
     private func drawCellBuffer<T>(_ cells: [T],
@@ -2339,6 +2407,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         encoder.setVertexBuffer(buffer, offset: 0, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        // A frame that gathers its rows moves their cells into place as it gathers them.
+        Self.setRowShift(0, encoder: encoder)
         if let texture {
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentSamplerState(sampler, index: 0)
@@ -2392,6 +2462,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentSamplerState(sampler, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        Self.setRowShift(0, encoder: encoder)
         for draw in draws {
             guard let buffer = makeBuffer(draw.vertices) else {
                 continue
@@ -2402,7 +2473,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func drawVertexBuffers(rows: [RowDrawBuffers],
+    private func drawVertexBuffers(rows: [PlacedRowBuffers],
                                    bufferKey: KeyPath<RowDrawBuffers, MTLBuffer?>,
                                    countKey: KeyPath<RowDrawBuffers, Int>,
                                    pipeline: MTLRenderPipelineState,
@@ -2411,7 +2482,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                    viewport: SIMD2<Float>) {
         var hasAny = false
         for row in rows {
-            if row[keyPath: bufferKey] != nil {
+            if row.buffers[keyPath: bufferKey] != nil {
                 hasAny = true
                 break
             }
@@ -2427,25 +2498,26 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             encoder.setFragmentSamplerState(sampler, index: 0)
         }
         for row in rows {
-            guard let buffer = row[keyPath: bufferKey] else {
+            guard let buffer = row.buffers[keyPath: bufferKey] else {
                 continue
             }
-            let count = row[keyPath: countKey]
+            let count = row.buffers[keyPath: countKey]
             if count == 0 {
                 continue
             }
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+            Self.setRowShift(row.shiftPx, encoder: encoder)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: count * 6)
         }
     }
 
-    private func drawImageRows(rows: [RowDrawBuffers],
+    private func drawImageRows(rows: [PlacedRowBuffers],
                                imageKey: KeyPath<RowDrawBuffers, [ImageDrawBuffer]>,
                                encoder: MTLRenderCommandEncoder,
                                viewport: SIMD2<Float>) {
         var hasAny = false
         for row in rows {
-            if !row[keyPath: imageKey].isEmpty {
+            if !row.buffers[keyPath: imageKey].isEmpty {
                 hasAny = true
                 break
             }
@@ -2457,8 +2529,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentSamplerState(sampler, index: 0)
         var viewportVar = viewport
         encoder.setVertexBytes(&viewportVar, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
-        for row in rows {
-            for draw in row[keyPath: imageKey] {
+        for row in rows where !row.buffers[keyPath: imageKey].isEmpty {
+            Self.setRowShift(row.shiftPx, encoder: encoder)
+            for draw in row.buffers[keyPath: imageKey] {
                 encoder.setVertexBuffer(draw.buffer, offset: 0, index: 0)
                 encoder.setFragmentTexture(draw.texture, index: 0)
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: draw.vertexCount)

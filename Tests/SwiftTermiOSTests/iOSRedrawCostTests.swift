@@ -156,6 +156,15 @@ struct iOSRedrawCostTests {
             case .linesOverAStatusLine: return "\r\u{1b}[2K" + printed + "status 1"
             }
         }
+
+        /// How many of the lines `output(printing:)` changes hold text: the lines printed, and the status
+        /// line drawn again, but not the blank line under printed lines.
+        func linesWithText(printing count: Int) -> Int {
+            switch self {
+            case .lines, .linesInAFullScreenRegion: count
+            case .linesOverAStatusLine: count + 1
+            }
+        }
     }
 
     /// A scrollback, and output streaming into it.
@@ -198,10 +207,65 @@ struct iOSRedrawCostTests {
     }
 
 #if DEBUG
-    /// What a frame did: how many rows it built anew, and the vertex bytes it handed the GPU.
+    /// What a frame did: how many rows it built anew, how many buffers it made for its rows' draw data,
+    /// the vertex bytes it handed the GPU, and the pixels it drew, when its view's frames copy them out.
     struct DrawnFrame {
         var rowsRebuilt: Int
+        var rowBuffersMade: Int
         var vertices: FrameVertexBytes
+        var pixels: FramePixels? = nil
+    }
+
+    /// The pixels a frame drew, row by row and four bytes each.
+    struct FramePixels: Equatable, CustomTestStringConvertible, CustomReflectable {
+        var width: Int
+        var bytes: [UInt8]
+
+        var height: Int { bytes.count / (width * 4) }
+
+        // A failure describes the frames and where they differ rather than printing every byte.
+        var testDescription: String { "\(width)×\(height) pixels" }
+        var customMirror: Mirror { Mirror(self, children: [:]) }
+
+        /// How many pixels differ from the same pixels of `other`, and the runs of rows they are in.
+        func difference(from other: FramePixels) -> String {
+            guard width == other.width, bytes.count == other.bytes.count else {
+                return "\(testDescription) against \(other.testDescription)"
+            }
+            var differingPixels = 0
+            var rowRuns: [ClosedRange<Int>] = []
+            for row in 0..<height {
+                let rowStart = row * width * 4
+                let differingInRow = stride(from: rowStart, to: rowStart + width * 4, by: 4).count(where: { pixel in
+                    bytes[pixel..<pixel + 4] != other.bytes[pixel..<pixel + 4]
+                })
+                guard differingInRow > 0 else {
+                    continue
+                }
+                differingPixels += differingInRow
+                if let last = rowRuns.last, last.upperBound == row - 1 {
+                    rowRuns[rowRuns.count - 1] = last.lowerBound...row
+                } else {
+                    rowRuns.append(row...row)
+                }
+            }
+            let runs = rowRuns.map { "\($0.lowerBound)...\($0.upperBound)" }.joined(separator: ", ")
+            return "\(differingPixels) pixels differ, in rows \(runs)"
+        }
+    }
+
+    /// Has the frames `view` draws from here on copy out the pixels they draw. Call it before the view's
+    /// first frame, so the view has made no framebuffer-only drawable.
+    ///
+    /// The view stops resizing its drawable on layout, leaving the size to the renderer, which sets it
+    /// before each frame. When the view's height falls between device pixels, the two round it a pixel
+    /// apart, and the frame after a layout would draw into a drawable a pixel taller than the frames
+    /// around it.
+    private func capturePixels(of view: TerminalView) throws {
+        let metalView = try #require(view.metalView)
+        metalView.framebufferOnly = false
+        metalView.autoResizeDrawable = false
+        try #require(view.metalRenderer).capturesPixelsForTesting = true
     }
 
     /// Waits until `condition` holds, failing the test after five seconds.
@@ -219,10 +283,23 @@ struct iOSRedrawCostTests {
         let renderer = try #require(view.metalRenderer)
         try await waitUntil("an earlier frame never finished on the GPU") { renderer.isIdle }
         try #require(view.metalView).draw()
-        let frame = DrawnFrame(rowsRebuilt: renderer.debugRowsRebuilt,
+        var frame = DrawnFrame(rowsRebuilt: renderer.debugRowsRebuilt,
+                               rowBuffersMade: renderer.debugRowBuffersMade,
                                vertices: renderer.lastFrameVertexBytesForTesting())
         try await waitUntil("the frame never finished on the GPU") { renderer.isIdle }
+        if renderer.capturesPixelsForTesting {
+            let pixels = try #require(renderer.lastFramePixelsForTesting(), "the frame copied out no pixels")
+            frame.pixels = FramePixels(width: pixels.width, bytes: pixels.bytes)
+        }
         return frame
+    }
+
+    /// Expects `frame` to draw the pixels `other` draws, and says where they differ when it does not.
+    private func expectSamePixels(_ frame: DrawnFrame, _ other: DrawnFrame,
+                                  sourceLocation: SourceLocation = #_sourceLocation) throws {
+        let pixels = try #require(frame.pixels, sourceLocation: sourceLocation)
+        let otherPixels = try #require(other.pixels, sourceLocation: sourceLocation)
+        #expect(pixels == otherPixels, "\(pixels.difference(from: otherPixels))", sourceLocation: sourceLocation)
     }
 
     /// Draws the frame due after a change from whatever draw data the renderer kept, then the same frame
@@ -284,13 +361,9 @@ struct iOSRedrawCostTests {
         withExtendedLifetime(window) {}
     }
 
-    /// Output streaming past the bottom of the screen, as a build log does, moves every line on the
-    /// screen up a row for each line it prints. The frame after it builds the lines the output changed
-    /// and keeps every other line's draw data, whatever scrollback the terminal keeps, on the alternate
-    /// screen, inside a scroll region the height of the screen, and under a status line the output draws
-    /// again.
-    @Test(arguments: StreamingCase.all, [1, 3])
-    func streamingOutputBuildsOnlyTheLinesItChanges(_ streaming: StreamingCase, printedLines: Int) async throws {
+    /// Streams `printedLines` lines past the bottom of a screen filled with text, and draws the frame due
+    /// after them.
+    private func drawFrameAfterStreaming(_ streaming: StreamingCase, printedLines: Int) async throws -> DrawnFrame {
         let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5,
                                                     scrollback: streaming.scrollback.lines,
                                                     layout: Layout(height: .partialRow, aggregated: false))
@@ -306,16 +379,38 @@ struct iOSRedrawCostTests {
         let topRow = try #require(view.metalVisibleRange()).lowerBound
         try #require(buffer.lines[topRow] !== topLine, "the output did not scroll the screen")
         let frame = try await drawFrame(view)
-        #expect(frame.rowsRebuilt == printedLines + 1)
         withExtendedLifetime(window) {}
+        return frame
+    }
+
+    /// Output streaming past the bottom of the screen, as a build log does, moves every line on the
+    /// screen up a row for each line it prints. The frame after it builds the lines the output changed
+    /// and keeps every other line's draw data, whatever scrollback the terminal keeps, on the alternate
+    /// screen, inside a scroll region the height of the screen, and under a status line the output draws
+    /// again.
+    @Test(arguments: StreamingCase.all, [1, 3])
+    func streamingOutputBuildsOnlyTheLinesItChanges(_ streaming: StreamingCase, printedLines: Int) async throws {
+        let frame = try await drawFrameAfterStreaming(streaming, printedLines: printedLines)
+        #expect(frame.rowsRebuilt == printedLines + 1)
+    }
+
+    /// A line that streaming output only moved up the screen draws from the buffers it had, wherever it
+    /// moved to, so the frame after the output makes buffers for the lines it changed alone: one for the
+    /// glyphs of each line that holds text, and none for a blank line.
+    @Test(arguments: StreamingCase.all, [1, 3])
+    func streamingOutputMakesBuffersOnlyForTheLinesItChanges(_ streaming: StreamingCase,
+                                                             printedLines: Int) async throws {
+        let frame = try await drawFrameAfterStreaming(streaming, printedLines: printedLines)
+        #expect(frame.rowBuffersMade == streaming.stream.linesWithText(printing: printedLines))
     }
 
     /// A frame that draws lines from the draw data the renderer kept hands the GPU the bytes the same
-    /// frame built from scratch hands it.
+    /// frame built from scratch hands it, and draws the same pixels.
     @Test(arguments: ScreenChange.allCases, Layout.all)
     func keptRowsDrawWhatRebuiltRowsDraw(after change: ScreenChange, layout: Layout) async throws {
         let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, scrollback: change.scrollback,
                                                     layout: layout)
+        try capturePixels(of: view)
         let rows = view.getTerminal().rows
         view.feed(text: change.setup(rows: rows))
         view.updateDisplay()
@@ -325,6 +420,29 @@ struct iOSRedrawCostTests {
         view.updateDisplay()
         let (cached, rebuilt) = try await drawCachedThenRebuilt(view)
         #expect(cached.vertices.rows == rebuilt.vertices.rows)
+        try expectSamePixels(cached, rebuilt)
+        withExtendedLifetime(window) {}
+    }
+
+    /// A frame that keeps buffers for each row has the GPU draw a row's buffers up the view at the row its
+    /// line moved to, where a frame that gathers its rows into one set of buffers moves their draw data
+    /// itself. After a change that moves lines, the two draw the same pixels.
+    @Test(arguments: ScreenChange.allCases, Layout.Height.allCases)
+    func keptRowBuffersDrawWhereGatheredRowsDraw(after change: ScreenChange, height: Layout.Height) async throws {
+        let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, scrollback: change.scrollback,
+                                                    layout: Layout(height: height, aggregated: false))
+        try capturePixels(of: view)
+        let rows = view.getTerminal().rows
+        view.feed(text: change.setup(rows: rows))
+        view.updateDisplay()
+        _ = try await drawFrame(view)
+
+        view.feed(text: change.output(rows: rows))
+        view.updateDisplay()
+        let kept = try await drawFrame(view)
+        view.metalBufferingMode = .perFrameAggregated
+        let gathered = try await drawFrame(view)
+        try expectSamePixels(kept, gathered)
         withExtendedLifetime(window) {}
     }
 
@@ -333,6 +451,7 @@ struct iOSRedrawCostTests {
     @Test(arguments: Layout.all)
     func aSelectionMadeAsTheScreenScrollsDrawsWhatARebuildDraws(layout: Layout) async throws {
         let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, layout: layout)
+        try capturePixels(of: view)
         let lastRow = try #require(view.metalVisibleRange()).upperBound
         view.selection.select(row: lastRow - 5)
         try await waitUntil("the view never marked the selection's rows") { !view.pendingSelectionChanged }
@@ -345,6 +464,7 @@ struct iOSRedrawCostTests {
         try await waitUntil("the view never marked the selection's rows") { !view.pendingSelectionChanged }
         let (cached, rebuilt) = try await drawCachedThenRebuilt(view)
         #expect(cached.vertices.rows == rebuilt.vertices.rows)
+        try expectSamePixels(cached, rebuilt)
         withExtendedLifetime(window) {}
     }
 
@@ -354,6 +474,7 @@ struct iOSRedrawCostTests {
     @Test(arguments: Layout.all)
     func aScrollThatDropsTheSelectionDrawsWhatARebuildDraws(layout: Layout) async throws {
         let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, layout: layout)
+        try capturePixels(of: view)
         let lastRow = try #require(view.metalVisibleRange()).upperBound
         view.selection.setSelection(start: Position(col: 0, row: lastRow - 5),
                                     end: Position(col: 3, row: lastRow - 3))
@@ -366,6 +487,7 @@ struct iOSRedrawCostTests {
         try #require(view.pendingSelectionChanged, "the view marked the selection's rows before the frame")
         let (cached, rebuilt) = try await drawCachedThenRebuilt(view)
         #expect(cached.vertices.rows == rebuilt.vertices.rows)
+        try expectSamePixels(cached, rebuilt)
         withExtendedLifetime(window) {}
     }
 
@@ -375,6 +497,7 @@ struct iOSRedrawCostTests {
     @Test(arguments: Layout.all)
     func aScrollUnderAHoveredLinkDrawsWhatARebuildDraws(layout: Layout) async throws {
         let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, scrollback: 3, layout: layout)
+        try capturePixels(of: view)
         let linkRow = try #require(view.metalVisibleRange()).lowerBound + 3
         view.linkHighlightRange = [Terminal.LinkMatch.RowRange(row: linkRow, range: 0..<4)]
         view.getTerminal().updateFullScreen()
@@ -385,6 +508,7 @@ struct iOSRedrawCostTests {
         view.updateDisplay()
         let (cached, rebuilt) = try await drawCachedThenRebuilt(view)
         #expect(cached.vertices.rows == rebuilt.vertices.rows)
+        try expectSamePixels(cached, rebuilt)
         withExtendedLifetime(window) {}
     }
 
@@ -396,6 +520,7 @@ struct iOSRedrawCostTests {
     func aBlinkMarkedBeforeAScrollDrawsWhatARebuildDraws(layout: Layout, scrollback: Scrollback) async throws {
         let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, scrollback: scrollback.lines,
                                                     layout: layout)
+        try capturePixels(of: view)
         view.feed(text: scrollback.setup(rows: view.getTerminal().rows) + "\r\u{1b}[5mblink\u{1b}[25m")
         view.updateDisplay()
         // Stop the view's blink timer, and keep the view from starting another, so only the test shows
@@ -410,6 +535,7 @@ struct iOSRedrawCostTests {
         view.updateDisplay()
         let (cached, rebuilt) = try await drawCachedThenRebuilt(view)
         #expect(cached.vertices.rows == rebuilt.vertices.rows)
+        try expectSamePixels(cached, rebuilt)
         withExtendedLifetime(window) {}
     }
 
