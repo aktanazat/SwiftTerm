@@ -119,6 +119,24 @@ final class SynchronizedOutputTests {
         #expect(!delegate.scrolledPositions.isEmpty)
     }
 
+    /// The view draws, once synchronized output ends, the rows output changed during it, so ending
+    /// reports those rows as changed, and only those: tmux sends every update in synchronized output,
+    /// and an end that reported every row would have the view build the whole screen for each.
+    @Test func testSyncEndReportsTheRowsChangedDuringIt() {
+        let terminal = Terminal(
+            delegate: TestDelegate(),
+            options: TerminalOptions(cols: 20, rows: 5, scrollback: 0)
+        )
+        let esc = "\u{1b}"
+        terminal.feed(text: "\(esc)[2J\(esc)[3H")
+        terminal.clearUpdateRange()
+
+        terminal.feed(text: "\(esc)[?2026hchanged\(esc)[?2026l")
+
+        #expect(terminal.getUpdateRange()?.startY == 2)
+        #expect(terminal.getUpdateRange()?.endY == 2)
+    }
+
     // MARK: - View-level regression tests
 
 #if os(macOS)

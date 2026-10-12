@@ -6824,7 +6824,10 @@ open class Terminal {
 
     // Mirrors ghostty: flip a flag and arm a safety timer. The view layer pauses
     // rendering while the flag is set (see updateDisplay's early-return). The
-    // live buffer is mutated normally; no snapshot is taken.
+    // live buffer is mutated normally; no snapshot is taken. The rows output
+    // changes meanwhile stay marked until the view draws them once the flag
+    // clears, so ending marks no row of its own: tmux sends every update in
+    // synchronized output, and a frame after each would build every row.
     private func beginSynchronizedOutput ()
     {
         let wasActive = synchronizedOutputActive
@@ -6843,7 +6846,6 @@ open class Terminal {
         synchronizedOutputActive = false
         synchronizedOutputTimeoutItem?.cancel()
         synchronizedOutputTimeoutItem = nil
-        refresh (startRow: 0, endRow: rows - 1)
         tdel?.synchronizedOutputChanged(source: self, active: false)
     }
 

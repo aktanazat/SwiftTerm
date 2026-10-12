@@ -160,8 +160,9 @@ struct iOSRedrawCostTests {
         /// The same in a tmux pane, as tmux 3.7 draws it in a scroll region the height of the screen: it
         /// scrolls the screen up as many rows as it has lines in one command, moves the cursor up as far,
         /// onto the status line, writes each line over what is left there, and writes the status line again
-        /// on the bottom row. Margin mode is on, with the margins the width of the screen, as tmux turns it
-        /// on for a terminal that reports horizontal scrolling, as SwiftTerm does.
+        /// on the bottom row. Margin mode is on, with the margins the width of the screen, and each update
+        /// comes in synchronized output, then the cursor's in another, as tmux sends them to a terminal
+        /// that reports horizontal scrolling and synchronized output, as SwiftTerm does.
         case linesAsTmuxDrawsThem
 
         /// How many lines the cases print at once. tmux scrolled a build log in four or five lines at a
@@ -198,8 +199,9 @@ struct iOSRedrawCostTests {
                     "\u{1b}[32mGenerating\u{1b}[39m \u{1b}[1mlhun-module-06\u{1b}(B\u{1b}[m v0.4.2 "
                         + "(\u{1b}[2mSources/Module22/File\(file).swift\u{1b}(B\u{1b}[m)\u{1b}[K\r\n"
                 }
-                return "\u{1b}[?25l\u{1b}[?12l\u{1b}[?25h\r\u{1b}[\(count)S\u{1b}[\(count)A" + lines.joined()
-                    + "\u{1b}[K" + Self.tmuxStatus(percent: 51)
+                return "\u{1b}[?2026h\r\u{1b}[\(count)S\u{1b}[\(count)A" + lines.joined()
+                    + "\u{1b}[K" + Self.tmuxStatus(percent: 51) + "\u{1b}[?2026l"
+                    + "\u{1b}[?2026h\u{1b}[?25l\u{1b}[?12l\u{1b}[?25h\u{1b}[?2026l"
             }
         }
 
