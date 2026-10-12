@@ -3258,6 +3258,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     open func showCursor(source: Terminal) {
+        #if canImport(MetalKit)
+        // The renderer draws the cursor, the caret view stays hidden, and updateDisplay redraws when the
+        // cursor shows or hides. tmux hides it around every update it sends.
+        if useMetalRenderer { return }
+        #endif
         guard let caretView else { return }
         if caretView.superview == nil {
             addSubview(caretView)
@@ -3265,6 +3270,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     open func hideCursor(source: Terminal) {
+        #if canImport(MetalKit)
+        if useMetalRenderer { return }
+        #endif
         caretView?.removeFromSuperview()
     }
     
