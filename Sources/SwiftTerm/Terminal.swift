@@ -5884,12 +5884,14 @@ open class Terminal {
 
             selectionsInvalidateForColumnRestrictedScroll (top: row, bottom: row + rowCount, left: buffer.marginLeft, right: buffer.marginRight)
         } else {
+            // The region's lines move down unchanged and blank lines fill the rows they leave, so
+            // the region is marked below as a scroll, not row by row as output.
             for _ in 0..<p {
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollBottom, deleteCount: 1,
-                                     items: [], change: { line in updateRange (line)})
+                                     items: [], change: { _ in })
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollTop, deleteCount: 0,
                                      items: [buffer.getBlankLine (attribute: da)],
-                                     change: { line in updateRange (line) })
+                                     change: { _ in })
             }
 
             let top = buffer.yBase + buffer.scrollTop
@@ -5898,7 +5900,8 @@ open class Terminal {
         }
         hardenBidiScrollBoundaries(insertedAtTop: true, count: p)
         // this.maxRange();
-        refreshScrolledRegion(top: buffer.scrollTop, bottom: buffer.scrollBottom, canBlit: false)
+        refreshScrolledRegion(top: buffer.scrollTop, bottom: buffer.scrollBottom, canBlit: false,
+                              linesOnlyMoved: !marginMode)
     }
 
     //
@@ -5927,12 +5930,14 @@ open class Terminal {
 
             selectionsInvalidateForColumnRestrictedScroll (top: row, bottom: row + rowCount, left: buffer.marginLeft, right: buffer.marginRight)
         } else {
+            // The region's lines move up unchanged and blank lines fill the rows they leave, so the
+            // region is marked below as a scroll, not row by row as output.
             for _ in 0..<p {
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollTop, deleteCount: 1,
-                                     items: [], change: { line in updateRange (line)})
+                                     items: [], change: { _ in })
                 buffer.lines.splice (start: buffer.yBase + buffer.scrollBottom, deleteCount: 0,
                                      items: [buffer.getBlankLine (attribute: da)],
-                                     change: { line in updateRange (line) })
+                                     change: { _ in })
             }
 
             let top = buffer.yBase + buffer.scrollTop
@@ -5941,7 +5946,8 @@ open class Terminal {
         }
         hardenBidiScrollBoundaries(insertedAtTop: false, count: p)
         // this.maxRange();
-        refreshScrolledRegion(top: buffer.scrollTop, bottom: buffer.scrollBottom, canBlit: false)
+        refreshScrolledRegion(top: buffer.scrollTop, bottom: buffer.scrollBottom, canBlit: false,
+                              linesOnlyMoved: !marginMode)
     }
 
     private func hardenBidiScrollBoundaries(insertedAtTop: Bool, count: Int) {
@@ -6485,11 +6491,11 @@ open class Terminal {
     /// [top, bottom] fixes the stale rows / bottom ghost — no whole-viewport repaint
     /// needed. Full-screen + scrollback (`canBlit`) keeps the cheap path.
     ///
-    /// `linesOnlyMoved` says the scroll recycled the buffer's top line: every other line
-    /// moved up a buffer row unchanged, and the recycled line came back cleared at the
-    /// bottom, as when a full scrollback drops its oldest line. Then the region is flagged
-    /// on screen only, and the scroll-invariant range keeps just the rows output changed,
-    /// as it does when a full scrollback drops a line.
+    /// `linesOnlyMoved` says the region's lines moved buffer rows unchanged and blank lines filled
+    /// the rows they left: the region scrolled up or down in place, or the scroll recycled the
+    /// buffer's top line, so every other line moved up a buffer row and the recycled line came back
+    /// cleared at the bottom, as when a full scrollback drops its oldest line. Then the region is
+    /// flagged on screen only, and the scroll-invariant range keeps just the rows output changed.
     private func refreshScrolledRegion(top: Int, bottom: Int, canBlit: Bool, linesOnlyMoved: Bool = false) {
         if top != 0 || bottom != rows - 1 || !canBlit {
             updateRange(startLine: top, endLine: bottom, scrolling: linesOnlyMoved)

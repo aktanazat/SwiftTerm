@@ -54,6 +54,14 @@ struct iOSRedrawCostTests {
         case insertLine
         /// Deleting a line pulls the lines under it up.
         case deleteLine
+        /// A scroll up command moves the lines of the screen up, and blank lines come in at the bottom.
+        case scrollUp
+        /// A scroll down command moves them down, and blank lines come in at the top.
+        case scrollDown
+        /// A scroll up command inside a scroll region between fixed lines.
+        case scrollUpInARegionBetweenFixedLines
+        /// A scroll down command inside a scroll region between fixed lines.
+        case scrollDownInARegionBetweenFixedLines
         case enterAlternateScreen
         case leaveAlternateScreen
 
@@ -63,7 +71,8 @@ struct iOSRedrawCostTests {
             case .newlineWithoutScrollback, .newlineInAFullScreenRegionOnTheAlternateScreen,
                  .linesOverAStatusLineOnTheAlternateScreen: 0
             case .newline, .regionAboveStatusLine, .regionBetweenFixedLines, .reverseIndex, .insertLine,
-                 .deleteLine, .enterAlternateScreen, .leaveAlternateScreen: nil
+                 .deleteLine, .scrollUp, .scrollDown, .scrollUpInARegionBetweenFixedLines,
+                 .scrollDownInARegionBetweenFixedLines, .enterAlternateScreen, .leaveAlternateScreen: nil
             }
         }
 
@@ -75,10 +84,11 @@ struct iOSRedrawCostTests {
             case .linesOverAStatusLineOnTheAlternateScreen:
                 Scrollback.alternateScreen.setup(rows: rows) + "\r\nstatus 0"
             case .regionAboveStatusLine: "\u{1b}[1;\(rows - 1)r"
-            case .regionBetweenFixedLines: "\u{1b}[2;\(rows - 1)r"
+            case .regionBetweenFixedLines, .scrollUpInARegionBetweenFixedLines,
+                 .scrollDownInARegionBetweenFixedLines: "\u{1b}[2;\(rows - 1)r"
             case .leaveAlternateScreen: "\u{1b}[?1049h\u{1b}[Halternate screen"
-            case .newline, .newlineWithoutScrollback, .reverseIndex, .insertLine, .deleteLine,
-                 .enterAlternateScreen: ""
+            case .newline, .newlineWithoutScrollback, .reverseIndex, .insertLine, .deleteLine, .scrollUp,
+                 .scrollDown, .enterAlternateScreen: ""
             }
         }
 
@@ -91,6 +101,10 @@ struct iOSRedrawCostTests {
             case .reverseIndex: "\u{1b}[H\u{1b}M"
             case .insertLine: "\u{1b}[3H\u{1b}[L"
             case .deleteLine: "\u{1b}[3H\u{1b}[M"
+            case .scrollUp: "\u{1b}[3S"
+            case .scrollDown: "\u{1b}[3T"
+            case .scrollUpInARegionBetweenFixedLines: "\u{1b}[2S"
+            case .scrollDownInARegionBetweenFixedLines: "\u{1b}[2T"
             case .enterAlternateScreen: "\u{1b}[?1049h\u{1b}[Halternate screen"
             case .leaveAlternateScreen: "\u{1b}[?1049l"
             }
@@ -174,6 +188,22 @@ struct iOSRedrawCostTests {
 
         static let all = Scrollback.allCases.flatMap { scrollback in
             LineStream.allCases.map { StreamingCase(scrollback: scrollback, stream: $0) }
+        }
+    }
+
+    /// A command that scrolls the lines of the screen in place, as tmux scrolls a pane.
+    enum ScrollCommand: CaseIterable, Sendable {
+        /// Scroll up, which moves the lines up and brings blank lines in at the bottom.
+        case scrollUp
+        /// Scroll down, which moves the lines down and brings blank lines in at the top.
+        case scrollDown
+
+        /// The command that scrolls `count` lines.
+        func output(scrolling count: Int) -> String {
+            switch self {
+            case .scrollUp: "\u{1b}[\(count)S"
+            case .scrollDown: "\u{1b}[\(count)T"
+            }
         }
     }
 
@@ -416,6 +446,24 @@ struct iOSRedrawCostTests {
     func streamingOutputBuildsNoAttributedString(_ streaming: StreamingCase, printedLines: Int) async throws {
         let frame = try await drawFrameAfterStreaming(streaming, printedLines: printedLines)
         #expect(frame.attributedStringsBuilt == 0)
+    }
+
+    /// A scroll up or down command moves the lines of the screen without changing them, so the frame
+    /// after it builds only the blank lines it brings in, whatever scrollback the terminal keeps.
+    @Test(arguments: Scrollback.allCases, ScrollCommand.allCases)
+    func aScrollCommandBuildsOnlyTheBlankLinesItBringsIn(scrollback: Scrollback,
+                                                         command: ScrollCommand) async throws {
+        let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, scrollback: scrollback.lines,
+                                                    layout: Layout(height: .partialRow, aggregated: false))
+        view.feed(text: scrollback.setup(rows: view.getTerminal().rows))
+        view.updateDisplay()
+        _ = try await drawFrame(view)
+
+        view.feed(text: command.output(scrolling: 3))
+        view.updateDisplay()
+        let frame = try await drawFrame(view)
+        #expect(frame.rowsRebuilt == 3)
+        withExtendedLifetime(window) {}
     }
 
     /// A frame that draws lines from the draw data the renderer kept hands the GPU the bytes the same

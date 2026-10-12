@@ -23,7 +23,9 @@ public final class BufferLine: CustomDebugStringConvertible {
     }
     /// True when this line is a continuation of the previous line: the text
     /// soft-wrapped onto it rather than starting after an explicit newline.
-    public internal(set) var isWrapped: Bool { didSet { bump() } }
+    /// Setting the value it already holds changes nothing, so it bumps the
+    /// render generation only on an actual change.
+    public internal(set) var isWrapped: Bool { didSet { if isWrapped != oldValue { bump() } } }
     /// BiDi state for the paragraph that contains this row.
     public internal(set) var bidiState: BidiPresentationState { didSet { bump() } }
     var renderMode: RenderLineMode = .single { didSet { bump() } }
