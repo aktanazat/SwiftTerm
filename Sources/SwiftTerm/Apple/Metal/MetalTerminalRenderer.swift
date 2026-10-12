@@ -61,6 +61,31 @@ struct ImageDraw {
     let vertices: [GlyphVertex]
 }
 
+/// Draw data that moves with its row's placement on screen.
+protocol RowPlaced {
+    var position: SIMD2<Float> { get set }
+}
+
+extension RowPlaced {
+    /// The same draw data `shiftPx` device pixels further up the view.
+    func moved(by shiftPx: Float) -> Self {
+        var moved = self
+        moved.position.y += shiftPx
+        return moved
+    }
+}
+
+extension GlyphVertex: RowPlaced {}
+extension TextCell: RowPlaced {}
+extension ColorCell: RowPlaced {}
+
+extension ImageDraw {
+    /// The same image draw `shiftPx` device pixels further up the view.
+    func moved(by shiftPx: Float) -> ImageDraw {
+        ImageDraw(texture: texture, vertices: vertices.map { $0.moved(by: shiftPx) })
+    }
+}
+
 struct ImageDrawBuffer {
     let texture: MTLTexture
     let buffer: MTLBuffer
@@ -77,6 +102,12 @@ struct RowDrawData {
     var placeholderImageDraws: [ImageDraw]
     var overImageDraws: [ImageDraw]
     var otherImageDraws: [ImageDraw]
+
+    /// Whether the row draws an image.
+    var hasImageDraws: Bool {
+        !underImageDraws.isEmpty || !placeholderImageDraws.isEmpty || !overImageDraws.isEmpty
+            || !otherImageDraws.isEmpty
+    }
 }
 
 struct RowDrawBuffers {
@@ -96,24 +127,58 @@ struct RowDrawBuffers {
     var otherImageBuffers: [ImageDrawBuffer]
 }
 
+/// Where a frame draws a row. The row's draw data is built with its bottom edge `localOriginY` points
+/// above the bottom of the view, less than a device pixel, and drawn `shiftPx` whole device pixels further
+/// up, so the same draw data draws its line at any row a scroll moves it to, to the bit.
+struct RowPlacement {
+    let localOriginY: CGFloat
+    let shiftPx: Float
+
+    /// The placement of a row whose bottom edge is `lineOriginY` points above the bottom of the view.
+    init(lineOriginY: CGFloat, scale: CGFloat) {
+        let originPx = lineOriginY * scale
+        let wholePx = originPx.rounded(.down)
+        localOriginY = (originPx - wholePx) / scale
+        shiftPx = Float(wholePx)
+    }
+}
+
 struct RowCacheEntry {
     var lineRef: BufferLine
     var generation: UInt64
     var bidiParagraphRevision: Int
-    var data: RowDrawData?
+    /// The buffer row the line was at when a frame last drew it.
+    var row: Int
+    /// Where that frame drew it.
+    var placement: RowPlacement
+    var data: RowDrawData
+    /// The row's draw data in buffers, placed by `placement`, when frames keep buffers for each row.
     var buffers: RowDrawBuffers?
 }
 
 struct FrameDrawData {
-    var backgroundCells: [ColorCell]
-    var powerlineJoinCells: [ColorCell]
-    var glyphCellsGray: [TextCell]
-    var glyphCellsColor: [TextCell]
-    var decorationCells: [ColorCell]
-    var underImageDraws: [ImageDraw]
-    var placeholderImageDraws: [ImageDraw]
-    var overImageDraws: [ImageDraw]
-    var otherImageDraws: [ImageDraw]
+    var backgroundCells: [ColorCell] = []
+    var powerlineJoinCells: [ColorCell] = []
+    var glyphCellsGray: [TextCell] = []
+    var glyphCellsColor: [TextCell] = []
+    var decorationCells: [ColorCell] = []
+    var underImageDraws: [ImageDraw] = []
+    var placeholderImageDraws: [ImageDraw] = []
+    var overImageDraws: [ImageDraw] = []
+    var otherImageDraws: [ImageDraw] = []
+
+    /// Adds a row's draw data, moved `shiftPx` device pixels up the view.
+    mutating func append(_ row: RowDrawData, movedBy shiftPx: Float) {
+        backgroundCells.append(contentsOf: row.backgroundCells.lazy.map { $0.moved(by: shiftPx) })
+        powerlineJoinCells.append(contentsOf: row.powerlineJoinCells.lazy.map { $0.moved(by: shiftPx) })
+        glyphCellsGray.append(contentsOf: row.glyphCellsGray.lazy.map { $0.moved(by: shiftPx) })
+        glyphCellsColor.append(contentsOf: row.glyphCellsColor.lazy.map { $0.moved(by: shiftPx) })
+        decorationCells.append(contentsOf: row.decorationCells.lazy.map { $0.moved(by: shiftPx) })
+        underImageDraws.append(contentsOf: row.underImageDraws.lazy.map { $0.moved(by: shiftPx) })
+        placeholderImageDraws.append(contentsOf: row.placeholderImageDraws.lazy.map { $0.moved(by: shiftPx) })
+        overImageDraws.append(contentsOf: row.overImageDraws.lazy.map { $0.moved(by: shiftPx) })
+        otherImageDraws.append(contentsOf: row.otherImageDraws.lazy.map { $0.moved(by: shiftPx) })
+    }
 }
 
 struct DrawData {
@@ -123,6 +188,17 @@ struct DrawData {
     var cursorGlyphVerticesGray: [GlyphVertex]
     var cursorGlyphVerticesColor: [GlyphVertex]
 }
+
+#if DEBUG
+/// The bytes of one frame's vertex data, as the GPU reads them.
+struct FrameVertexBytes: Equatable {
+    /// The rows' draw data: an entry for each kind of cell and for each image draw, row by row, or for
+    /// the whole frame when the frame gathers its rows into one set of buffers.
+    var rows: [[UInt8]] = []
+    /// The cursor's vertices, an entry for each kind.
+    var cursor: [[UInt8]] = []
+}
+#endif
 
 struct KittyImageSignature: Hashable {
     let kind: UInt8
@@ -172,7 +248,6 @@ struct CacheSignature: Hashable {
     let cellHeight: Double
     let viewWidth: Double
     let viewHeight: Double
-    let yDisp: Int
     let rows: Int
     let cols: Int
     let fontName: String
@@ -209,7 +284,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     private var customGlyphCache: [CustomGlyphKey: CustomGlyphEntry] = [:]
     private let imageTextureCache = NSMapTable<AnyObject, MTLTexture>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private var kittyTextureCache: [UInt32: (signature: KittyImageSignature, texture: MTLTexture)] = [:]
-    private var rowCache: [Int: RowCacheEntry] = [:]
+    /// The draw data of the lines the last frame drew, by line, so a line keeps its draw data wherever a
+    /// scroll moves it.
+    private var rowCache: [ObjectIdentifier: RowCacheEntry] = [:]
     private var cacheBufferingMode: MetalBufferingMode?
     private var cacheSignature: CacheSignature?
     private var atlasInvalidatedDuringBuild = false
@@ -247,6 +324,8 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
     /// Rows whose draw data the last frame built anew rather than took from the row cache.
     private(set) var debugRowsRebuilt = 0
     private var debugRowsCached = 0
+    /// What the last frame handed the GPU, for tests that compare frames.
+    private var debugLastDrawData: DrawData?
 #endif
 #if DEBUG
     private var imageTextureFailures: Set<ObjectIdentifier> = []
@@ -347,6 +426,67 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         frameCoordinator.isIdle
     }
 
+#if DEBUG
+    /// Drops every row's cached draw data, so the next frame builds every row it draws.
+    func discardRowCacheForTesting() {
+        rowCache.removeAll()
+    }
+
+    /// Shows or hides a blinking cursor in the frames that follow, as the blink timer does.
+    func setCursorBlinkOnForTesting(_ on: Bool) {
+        cursorBlinkOn = on
+    }
+
+    /// The vertex bytes the last frame handed the GPU.
+    func lastFrameVertexBytesForTesting() -> FrameVertexBytes {
+        var bytes = FrameVertexBytes()
+        guard let drawData = debugLastDrawData else {
+            return bytes
+        }
+        for row in drawData.rows {
+            bytes.rows.append(Self.bytes(of: row.backgroundBuffer, count: row.backgroundCount, as: ColorCell.self))
+            bytes.rows.append(Self.bytes(of: row.powerlineJoinBuffer, count: row.powerlineJoinCount, as: ColorCell.self))
+            bytes.rows.append(Self.bytes(of: row.glyphGrayBuffer, count: row.glyphGrayCount, as: TextCell.self))
+            bytes.rows.append(Self.bytes(of: row.glyphColorBuffer, count: row.glyphColorCount, as: TextCell.self))
+            bytes.rows.append(Self.bytes(of: row.decorationBuffer, count: row.decorationCount, as: ColorCell.self))
+            for image in row.underImageBuffers + row.placeholderImageBuffers + row.overImageBuffers + row.otherImageBuffers {
+                bytes.rows.append(Self.bytes(of: image.buffer, count: image.vertexCount, as: GlyphVertex.self))
+            }
+        }
+        if let frame = drawData.frame {
+            bytes.rows.append(Self.bytes(of: frame.backgroundCells))
+            bytes.rows.append(Self.bytes(of: frame.powerlineJoinCells))
+            bytes.rows.append(Self.bytes(of: frame.glyphCellsGray))
+            bytes.rows.append(Self.bytes(of: frame.glyphCellsColor))
+            bytes.rows.append(Self.bytes(of: frame.decorationCells))
+            for image in frame.underImageDraws + frame.placeholderImageDraws + frame.overImageDraws + frame.otherImageDraws {
+                bytes.rows.append(Self.bytes(of: image.vertices))
+            }
+        }
+        // A color vertex pads its position out to its color's alignment, and nothing reads the padding.
+        let cursorColorBytes: [UInt8] = drawData.cursorColorVertices.flatMap { vertex in
+            Self.bytes(of: [vertex.position]) + Self.bytes(of: [vertex.color])
+        }
+        bytes.cursor = [
+            cursorColorBytes,
+            Self.bytes(of: drawData.cursorGlyphVerticesGray),
+            Self.bytes(of: drawData.cursorGlyphVerticesColor),
+        ]
+        return bytes
+    }
+
+    private static func bytes<T>(of buffer: MTLBuffer?, count: Int, as _: T.Type) -> [UInt8] {
+        guard let buffer, count > 0 else {
+            return []
+        }
+        return Array(UnsafeRawBufferPointer(start: buffer.contents(), count: count * MemoryLayout<T>.stride))
+    }
+
+    private static func bytes<T>(of items: [T]) -> [UInt8] {
+        items.withUnsafeBytes { Array($0) }
+    }
+#endif
+
     func invalidateForReplacement() {
         frameCoordinator.invalidate()
         cursorBlinkTimer?.invalidate()
@@ -438,6 +578,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         }
 #endif
 #if DEBUG
+        debugLastDrawData = drawData
         debugFrameCount += 1
         let now = CFAbsoluteTimeGetCurrent()
         let elapsed = now - debugLastLogTime
@@ -715,7 +856,6 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                        cellHeight: Double(cellHeight),
                                        viewWidth: Double(terminalView.bounds.width),
                                        viewHeight: Double(terminalView.bounds.height),
-                                       yDisp: visibleDisp,
                                        rows: buffer.rows,
                                        cols: buffer.cols,
                                        fontName: terminalView.fontSet.normal.fontName,
@@ -723,35 +863,26 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                        isAltBuffer: terminalView.terminal.isCurrentBufferAlternate,
                                        kittyStamp: kittyStamp,
                                        bidiHostPolicy: terminalView.bidiHostPolicy)
-        let signatureChanged = signature != cacheSignature
-        if signatureChanged {
+        if signature != cacheSignature {
             rowCache.removeAll()
             cacheSignature = signature
         }
 
-        let visibleRange = firstRow...lastRow
-        if !rowCache.isEmpty {
-            rowCache = rowCache.filter { visibleRange.contains($0.key) }
-        }
-
+#if os(iOS) || os(visionOS)
+        // The view marks every row for a selection change on a later turn of the main loop, so a frame
+        // drawn before then builds every row itself.
+        let dirtyRange = terminalView.pendingSelectionChanged ? firstRow...lastRow : terminalView.metalDirtyRange
+#else
         let dirtyRange = terminalView.metalDirtyRange
+#endif
         terminalView.metalDirtyRange = nil
-        let needsFullRebuild = signatureChanged || rowCache.isEmpty
-        let rebuildRange = needsFullRebuild ? visibleRange : intersect(dirtyRange, visibleRange)
+        // The selection and a hovered link are drawn by buffer row, so while either shows, a line that
+        // moved to another buffer row may have moved into or out of it.
+        let highlightsFollowBufferRows = terminalView.selection?.active == true
+            || terminalView.linkHighlightRange != nil
 
         var rows: [RowDrawBuffers] = []
-        var frameData: FrameDrawData?
-        if bufferingMode == .perFrameAggregated {
-            frameData = FrameDrawData(backgroundCells: [],
-                                      powerlineJoinCells: [],
-                                      glyphCellsGray: [],
-                                      glyphCellsColor: [],
-                                      decorationCells: [],
-                                      underImageDraws: [],
-                                      placeholderImageDraws: [],
-                                      overImageDraws: [],
-                                      otherImageDraws: [])
-        }
+        var frameData: FrameDrawData? = bufferingMode == .perFrameAggregated ? FrameDrawData() : nil
         let isAltBuffer = terminalView.terminal.isCurrentBufferAlternate
         var virtualPlacementsByImageId: [UInt32: [KittyPlacementRecord]] = [:]
         if !terminalView.terminal.kittyGraphicsState.placementsByKey.isEmpty {
@@ -761,109 +892,61 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             }
         }
 
+        let viewHeight = terminalView.bounds.height
+        var nextCache: [ObjectIdentifier: RowCacheEntry] = [:]
+        nextCache.reserveCapacity(lastRow - firstRow + 1)
         var rebuiltRows = 0
         var cachedRows = 0
-        for row in visibleRange {
+        for row in firstRow...lastRow {
             let line = buffer.lines[row]
             let lineGeneration = line.generation
             let bidiParagraphRevision = TerminalBidi.layoutRevision(
                 row: row, buffer: buffer,
                 maximumRows: terminalView.terminal.options.maximumBidiParagraphRows)
-            var entry = rowCache[row]
-            // Cache is valid only when the absolute row still maps to the same
-            // BufferLine instance (scrolls rotate refs in the CircularList) and
-            // that line has not been mutated since we cached its draw data.
-            let cacheValid = entry?.lineRef === line
-                && entry?.generation == lineGeneration
-                && entry?.bidiParagraphRevision == bidiParagraphRevision
-            let needsRebuild = needsFullRebuild ||
-                (rebuildRange?.contains(row) ?? false) ||
-                !cacheValid ||
-                (bufferingMode == .perFrameAggregated && entry?.data == nil)
-            let rowBuffers: RowDrawBuffers?
-            let rowData: RowDrawData
-            if needsRebuild {
-                rowData = buildRowDrawData(row: row,
-                                           buffer: buffer,
-                                           yDisp: visibleDisp,
-                                           cellWidth: cellWidth,
-                                           cellHeight: cellHeight,
-                                           yOffset: yOffset,
-                                           viewWidthPx: viewWidthPx,
-                                           scale: scale,
-                                           virtualPlacementsByImageId: virtualPlacementsByImageId)
-                let buffers = bufferingMode == .perRowPersistent ? makeRowBuffers(from: rowData) : nil
-                entry = RowCacheEntry(lineRef: line, generation: lineGeneration,
-                                      bidiParagraphRevision: bidiParagraphRevision,
-                                      data: rowData, buffers: buffers)
-                rowCache[row] = entry
-                rowBuffers = buffers
-                rebuiltRows += 1
-            } else if let cached = entry {
-                rowData = cached.data ?? buildRowDrawData(row: row,
-                                                          buffer: buffer,
-                                                          yDisp: visibleDisp,
-                                                          cellWidth: cellWidth,
-                                                          cellHeight: cellHeight,
-                                                          yOffset: yOffset,
-                                                          viewWidthPx: viewWidthPx,
-                                                          scale: scale,
-                                                          virtualPlacementsByImageId: virtualPlacementsByImageId)
-                if cached.data == nil {
-                    entry = RowCacheEntry(lineRef: line, generation: lineGeneration,
-                                          bidiParagraphRevision: bidiParagraphRevision,
-                                          data: rowData, buffers: cached.buffers)
-                    rowCache[row] = entry
-                }
-                if bufferingMode == .perRowPersistent {
-                    if let buffers = cached.buffers {
-                        rowBuffers = buffers
-                    } else {
-                        let buffers = makeRowBuffers(from: rowData)
-                        entry?.buffers = buffers
-                        rowCache[row] = entry
-                        rowBuffers = buffers
-                    }
-                } else {
-                    rowBuffers = nil
-                }
+            // Rows run down from the top of the view, a cell height apart.
+            let placement = RowPlacement(lineOriginY: viewHeight - cellHeight * CGFloat(row - visibleDisp + 1),
+                                         scale: scale)
+            let key = ObjectIdentifier(line)
+            var entry: RowCacheEntry
+            if let cached = rowCache[key],
+               Self.canReuse(cached, at: row, placement: placement, generation: lineGeneration,
+                             bidiParagraphRevision: bidiParagraphRevision, dirtyRange: dirtyRange,
+                             highlightsFollowBufferRows: highlightsFollowBufferRows) {
+                entry = cached
                 cachedRows += 1
             } else {
-                rowData = buildRowDrawData(row: row,
-                                           buffer: buffer,
-                                           yDisp: visibleDisp,
-                                           cellWidth: cellWidth,
-                                           cellHeight: cellHeight,
-                                           yOffset: yOffset,
-                                           viewWidthPx: viewWidthPx,
-                                           scale: scale,
-                                           virtualPlacementsByImageId: virtualPlacementsByImageId)
-                let buffers = bufferingMode == .perRowPersistent ? makeRowBuffers(from: rowData) : nil
+                let data = buildRowDrawData(row: row,
+                                            buffer: buffer,
+                                            lineOriginY: placement.localOriginY,
+                                            cellWidth: cellWidth,
+                                            cellHeight: cellHeight,
+                                            yOffset: yOffset,
+                                            viewWidthPx: viewWidthPx,
+                                            scale: scale,
+                                            virtualPlacementsByImageId: virtualPlacementsByImageId)
                 entry = RowCacheEntry(lineRef: line, generation: lineGeneration,
                                       bidiParagraphRevision: bidiParagraphRevision,
-                                      data: rowData, buffers: buffers)
-                rowCache[row] = entry
-                rowBuffers = buffers
+                                      row: row, placement: placement, data: data, buffers: nil)
                 rebuiltRows += 1
             }
-            if let rowBuffers {
-                rows.append(rowBuffers)
-            }
-            if bufferingMode == .perFrameAggregated {
-                if var currentFrame = frameData {
-                    currentFrame.backgroundCells.append(contentsOf: rowData.backgroundCells)
-                    currentFrame.powerlineJoinCells.append(contentsOf: rowData.powerlineJoinCells)
-                    currentFrame.glyphCellsGray.append(contentsOf: rowData.glyphCellsGray)
-                    currentFrame.glyphCellsColor.append(contentsOf: rowData.glyphCellsColor)
-                    currentFrame.decorationCells.append(contentsOf: rowData.decorationCells)
-                    currentFrame.underImageDraws.append(contentsOf: rowData.underImageDraws)
-                    currentFrame.placeholderImageDraws.append(contentsOf: rowData.placeholderImageDraws)
-                    currentFrame.overImageDraws.append(contentsOf: rowData.overImageDraws)
-                    currentFrame.otherImageDraws.append(contentsOf: rowData.otherImageDraws)
-                    frameData = currentFrame
+            switch bufferingMode {
+            case .perRowPersistent:
+                let buffers: RowDrawBuffers
+                if let placed = entry.buffers, entry.placement.shiftPx == placement.shiftPx {
+                    buffers = placed
+                } else {
+                    buffers = makeRowBuffers(from: entry.data, shiftPx: placement.shiftPx)
+                    entry.buffers = buffers
                 }
+                rows.append(buffers)
+            case .perFrameAggregated:
+                frameData?.append(entry.data, movedBy: placement.shiftPx)
             }
+            entry.row = row
+            entry.placement = placement
+            nextCache[key] = entry
         }
+        rowCache = nextCache
 #if DEBUG
         debugRowsRebuilt = rebuiltRows
         debugRowsCached = cachedRows
@@ -885,16 +968,32 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                         cursorGlyphVerticesColor: cursorData.glyphVerticesColor)
     }
 
-    private func intersect(_ range: ClosedRange<Int>?, _ other: ClosedRange<Int>) -> ClosedRange<Int>? {
-        guard let range else {
-            return nil
+    /// Whether a line's cached draw data draws it at buffer row `row`, placed at `placement`.
+    private static func canReuse(_ cached: RowCacheEntry,
+                                 at row: Int,
+                                 placement: RowPlacement,
+                                 generation: UInt64,
+                                 bidiParagraphRevision: Int,
+                                 dirtyRange: ClosedRange<Int>?,
+                                 highlightsFollowBufferRows: Bool) -> Bool {
+        // The line's text, attributes, and bidi layout are as they were when the data was built, and the
+        // data sits the same fraction of a device pixel off the pixel grid.
+        guard cached.generation == generation,
+              cached.bidiParagraphRevision == bidiParagraphRevision,
+              cached.placement.localOriginY == placement.localOriginY else {
+            return false
         }
-        let lower = max(range.lowerBound, other.lowerBound)
-        let upper = min(range.upperBound, other.upperBound)
-        if lower > upper {
-            return nil
+        // A row marked since then, at the line's old row, its new one, or a row it moved past between
+        // them, may draw differently.
+        if let dirtyRange, dirtyRange.overlaps(min(row, cached.row)...max(row, cached.row)) {
+            return false
         }
-        return lower...upper
+        // An image is placed by buffer row and on the pixel grid, so a row that draws one is built again
+        // wherever it moves.
+        if cached.data.hasImageDraws {
+            return cached.row == row && cached.placement.shiftPx == placement.shiftPx
+        }
+        return cached.row == row || !highlightsFollowBufferRows
     }
 
     private func visibleRowRange(buffer: Buffer,
@@ -928,9 +1027,11 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
+    /// Builds the draw data of buffer row `row`, with the row's bottom edge `lineOriginY` points above the
+    /// bottom of the view.
     private func buildRowDrawData(row: Int,
                                   buffer: Buffer,
-                                  yDisp: Int,
+                                  lineOriginY: CGFloat,
                                   cellWidth: CGFloat,
                                   cellHeight: CGFloat,
                                   yOffset: CGFloat,
@@ -972,8 +1073,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 
         let line = buffer.lines[row]
         let renderMode = line.renderMode
-        let lineOffset = cellHeight * CGFloat(row - yDisp + 1)
-        let lineOrigin = CGPoint(x: 0, y: terminalView.bounds.height - lineOffset)
+        let lineOrigin = CGPoint(x: 0, y: lineOriginY)
         let rowBase = lineOrigin.y + cellHeight
         let lineInfo = terminalView.buildAttributedString(row: row, line: line, cols: buffer.cols)
         let shapedSegments = buildShapedSegments(lineInfo.segments, terminalView: terminalView)
@@ -2125,29 +2225,28 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return bufferPool.makeBuffer(vertices)
     }
 
-    private func makeStaticBuffer<T>(_ vertices: [T]) -> (MTLBuffer?, Int) {
-        let count = vertices.count
-        guard count > 0 else {
+    /// A buffer holding `items` moved `shiftPx` device pixels up the view.
+    private func makePlacedBuffer<T: RowPlaced>(_ items: [T], shiftPx: Float) -> (MTLBuffer?, Int) {
+        let count = items.count
+        guard count > 0,
+              let buffer = device.makeBuffer(length: count * MemoryLayout<T>.stride, options: .storageModeShared) else {
             return (nil, 0)
         }
-        let byteCount = count * MemoryLayout<T>.stride
-        guard let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared) else {
-            return (nil, 0)
-        }
-        vertices.withUnsafeBytes { raw in
-            memcpy(buffer.contents(), raw.baseAddress!, byteCount)
+        let placed = buffer.contents().bindMemory(to: T.self, capacity: count)
+        for (index, item) in items.enumerated() {
+            (placed + index).initialize(to: item.moved(by: shiftPx))
         }
         return (buffer, count)
     }
 
-    private func makeImageDrawBuffers(_ draws: [ImageDraw]) -> [ImageDrawBuffer] {
+    private func makeImageDrawBuffers(_ draws: [ImageDraw], shiftPx: Float) -> [ImageDrawBuffer] {
         guard !draws.isEmpty else {
             return []
         }
         var result: [ImageDrawBuffer] = []
         result.reserveCapacity(draws.count)
         for draw in draws {
-            let (buffer, count) = makeStaticBuffer(draw.vertices)
+            let (buffer, count) = makePlacedBuffer(draw.vertices, shiftPx: shiftPx)
             guard let buffer, count > 0 else {
                 continue
             }
@@ -2156,12 +2255,13 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return result
     }
 
-    private func makeRowBuffers(from data: RowDrawData) -> RowDrawBuffers {
-        let (backgroundBuffer, backgroundCount) = makeStaticBuffer(data.backgroundCells)
-        let (powerlineJoinBuffer, powerlineJoinCount) = makeStaticBuffer(data.powerlineJoinCells)
-        let (glyphGrayBuffer, glyphGrayCount) = makeStaticBuffer(data.glyphCellsGray)
-        let (glyphColorBuffer, glyphColorCount) = makeStaticBuffer(data.glyphCellsColor)
-        let (decorationBuffer, decorationCount) = makeStaticBuffer(data.decorationCells)
+    /// Buffers holding a row's draw data moved `shiftPx` device pixels up the view.
+    private func makeRowBuffers(from data: RowDrawData, shiftPx: Float) -> RowDrawBuffers {
+        let (backgroundBuffer, backgroundCount) = makePlacedBuffer(data.backgroundCells, shiftPx: shiftPx)
+        let (powerlineJoinBuffer, powerlineJoinCount) = makePlacedBuffer(data.powerlineJoinCells, shiftPx: shiftPx)
+        let (glyphGrayBuffer, glyphGrayCount) = makePlacedBuffer(data.glyphCellsGray, shiftPx: shiftPx)
+        let (glyphColorBuffer, glyphColorCount) = makePlacedBuffer(data.glyphCellsColor, shiftPx: shiftPx)
+        let (decorationBuffer, decorationCount) = makePlacedBuffer(data.decorationCells, shiftPx: shiftPx)
         return RowDrawBuffers(backgroundBuffer: backgroundBuffer,
                               backgroundCount: backgroundCount,
                               powerlineJoinBuffer: powerlineJoinBuffer,
@@ -2172,10 +2272,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                               glyphColorCount: glyphColorCount,
                               decorationBuffer: decorationBuffer,
                               decorationCount: decorationCount,
-                              underImageBuffers: makeImageDrawBuffers(data.underImageDraws),
-                              placeholderImageBuffers: makeImageDrawBuffers(data.placeholderImageDraws),
-                              overImageBuffers: makeImageDrawBuffers(data.overImageDraws),
-                              otherImageBuffers: makeImageDrawBuffers(data.otherImageDraws))
+                              underImageBuffers: makeImageDrawBuffers(data.underImageDraws, shiftPx: shiftPx),
+                              placeholderImageBuffers: makeImageDrawBuffers(data.placeholderImageDraws, shiftPx: shiftPx),
+                              overImageBuffers: makeImageDrawBuffers(data.overImageDraws, shiftPx: shiftPx),
+                              otherImageBuffers: makeImageDrawBuffers(data.otherImageDraws, shiftPx: shiftPx))
     }
 
     private func drawCellBuffer<T>(_ cells: [T],
