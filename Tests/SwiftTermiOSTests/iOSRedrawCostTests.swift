@@ -722,6 +722,24 @@ struct iOSRedrawCostTests {
         #expect(hidden.vertices.rows == shown.vertices.rows)
         withExtendedLifetime(window) {}
     }
+
+    /// A blinking cursor told to stop blinking stops in its shown phase, whichever phase the blink was in.
+    @Test(arguments: Layout.all)
+    func aCursorToldNotToBlinkStaysShown(layout: Layout) async throws {
+        let (view, window) = try makeFilledTerminal(linesPastTheScreen: 5, layout: layout)
+        view.caretViewTracksFocus = false
+        view.getTerminal().setCursorStyle(.blinkBlock)
+        let renderer = try #require(view.metalRenderer)
+        _ = try await drawFrame(view)
+        renderer.setCursorBlinkOnForTesting(false)
+        let hidden = try await drawFrame(view)
+        try #require(hidden.vertices.cursor.joined().isEmpty, "the blink's hidden phase drew the cursor")
+
+        view.cursorBlinks = false
+        let still = try await drawFrame(view)
+        #expect(!still.vertices.cursor.joined().isEmpty, "the cursor stopped blinking hidden")
+        withExtendedLifetime(window) {}
+    }
 #endif
 
     /// Counts the layout notices the view would post, instead of posting them.

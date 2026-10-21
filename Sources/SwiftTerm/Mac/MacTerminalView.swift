@@ -200,6 +200,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
     }
 
+    /// Whether a blinking cursor style blinks. Off, the cursor holds still and shown, and the renderer
+    /// keeps no blink timer, so a screen with nothing new on it presents no frames for the cursor.
+    public var cursorBlinks = true {
+        didSet {
+#if canImport(MetalKit)
+            if cursorBlinks != oldValue { queueMetalDisplay() }
+#endif
+        }
+    }
+
     var accessibility: AccessibilityService = AccessibilityService()
     var search: SearchService!
     private var findBar: TerminalFindBarView?

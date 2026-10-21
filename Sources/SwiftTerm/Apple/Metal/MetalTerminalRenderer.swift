@@ -590,6 +590,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         view.drawableSize = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
         let cursorStyle = terminalView.terminal.options.cursorStyle
         let shouldBlink = isBlinkStyle(cursorStyle)
+            && terminalView.cursorBlinks
             && !terminalView.terminal.cursorHidden
             && cursorHasFocus(in: terminalView)
         updateCursorBlinkTimer(shouldBlink: shouldBlink)
