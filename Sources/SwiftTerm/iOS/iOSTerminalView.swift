@@ -202,7 +202,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public var cursorBlinks = true {
         didSet {
 #if canImport(MetalKit)
-            if cursorBlinks != oldValue { queueMetalDisplay() }
+            guard cursorBlinks != oldValue else { return }
+            switch terminal.options.cursorStyle {
+            case .blinkBlock, .blinkUnderline, .blinkBar:
+                queueMetalDisplay()
+            case .steadyBlock, .steadyUnderline, .steadyBar:
+                break
+            }
 #endif
         }
     }

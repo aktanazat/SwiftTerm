@@ -740,6 +740,61 @@ struct iOSRedrawCostTests {
         #expect(!still.vertices.cursor.joined().isEmpty, "the cursor stopped blinking hidden")
         withExtendedLifetime(window) {}
     }
+
+    enum SteadyCursor: CaseIterable, Sendable {
+        case block, underline, bar
+
+        var style: CursorStyle {
+            switch self {
+            case .block: .steadyBlock
+            case .underline: .steadyUnderline
+            case .bar: .steadyBar
+            }
+        }
+    }
+
+    @Test(arguments: SteadyCursor.allCases)
+    func changingBlinkPermissionDoesNotRedrawASteadyCursor(cursor: SteadyCursor) async throws {
+        let (view, window) = try makeFilledTerminal()
+        view.caretViewTracksFocus = false
+        view.getTerminal().setCursorStyle(cursor.style)
+        _ = try await drawFrame(view)
+        await DisplayFrames().advance()
+        let initial = view.metalRendererStatus.presentedFrameCount
+        try #require(initial > 0)
+
+        view.cursorBlinks = false
+        await DisplayFrames().advance()
+        #expect(view.metalRendererStatus.presentedFrameCount == initial)
+        view.cursorBlinks = true
+        await DisplayFrames().advance()
+        #expect(view.metalRendererStatus.presentedFrameCount == initial)
+        withExtendedLifetime(window) {}
+    }
+
+    private final class DisplayFrames: NSObject {
+        private var remaining = 8
+        private var link: CADisplayLink?
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        func advance() async {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                let link = CADisplayLink(target: self, selector: #selector(frame))
+                self.link = link
+                link.add(to: .main, forMode: .common)
+            }
+        }
+
+        @objc private func frame() {
+            remaining -= 1
+            guard remaining == 0 else { return }
+            link?.invalidate()
+            link = nil
+            continuation?.resume()
+            continuation = nil
+        }
+    }
 #endif
 
     /// Counts the layout notices the view would post, instead of posting them.

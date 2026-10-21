@@ -143,3 +143,12 @@ Methodology notes
   slower; `arabic` when BiDi paragraph analysis, shaping, or font fallback
   gets slower. A change that only moves `arabic` costs RTL users only; a
   change that moves `dense`/`scroll` costs everyone.
+
+iOS idle cursor guard
+---------------------
+
+`iOSRedrawCostTests.changingBlinkPermissionDoesNotRedrawASteadyCursor`
+counts presented Metal frames while blink permission changes for each steady
+cursor style. Neither change may present another frame. Blinking styles still
+redraw when permission changes, including when a hidden cursor must become
+visible. Run the iOS redraw suite with the `SwiftTermiOSTests` scheme.
