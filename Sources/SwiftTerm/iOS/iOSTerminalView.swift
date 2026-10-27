@@ -3198,7 +3198,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
     
-    public override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+    open override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         keyRepeat?.invalidate()
         keyRepeat = nil
         let wasCommandActive = commandActive
