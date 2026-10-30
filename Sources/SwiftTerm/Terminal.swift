@@ -284,6 +284,9 @@ public protocol TerminalImage {
     
     /// Column where the image was attached
     var col: Int { get set }
+
+    /// Columns the image covers, starting at `col`
+    var cols: Int { get }
 }
 
 /**
@@ -3360,6 +3363,8 @@ open class Terminal {
         let line = buffer.lines [buffer.yBase + y]
         if clearImages {
             buffer.clearImagesFromLine(at: buffer.yBase + y)
+        } else {
+            buffer.eraseImages(onLineAt: buffer.yBase + y, columns: start..<end)
         }
         let cd = CharData (attribute: eraseAttr ())
         line.replaceCells (start: start, end: end, fillData: cd)
@@ -5852,7 +5857,7 @@ open class Terminal {
     func cmdEraseChars (_ pars: [Int], _ collect: cstring)
     {
         let p = max (pars.count == 0 ? 1 : pars [0], 1)
-
+        buffer.eraseImages(onLineAt: buffer.y + buffer.yBase, columns: buffer.x..<(buffer.x + p))
         buffer.lines [buffer.y + buffer.yBase].replaceCells (
             start: buffer.x,
             end: buffer.x + p,

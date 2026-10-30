@@ -11,6 +11,7 @@ final class KittyRelativePlacementTests {
         let pixelWidth: Int
         let pixelHeight: Int
         var col: Int
+        let cols = 1
 
         var kittyIsKitty: Bool = true
         var kittyImageId: UInt32?

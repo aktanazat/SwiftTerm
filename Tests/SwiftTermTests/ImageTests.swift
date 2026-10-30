@@ -15,6 +15,7 @@ struct MockTerminalImage: TerminalImage {
     var pixelWidth: Int = 100
     var pixelHeight: Int = 100
     var col: Int = 0
+    var cols: Int = 10
 }
 
 final class ImageTests {
@@ -249,6 +250,24 @@ final class ImageTrackingTests: TerminalDelegate {
         terminal.feed(text: "\u{1b}[?1049l")
         #expect(terminal.altBuffer.hasAnyImages == false, "Alt buffer should be cleared")
         #expect(terminal.normalBuffer.hasAnyImages == true, "Normal buffer should still have images")
+    }
+
+    /// Text or an erase over an image's columns takes the image off the line, as tmux expects when it
+    /// repaints; text and erases beside it leave it.
+    @Test(arguments: [
+        ("\u{1b}[H\u{1b}[K", false),
+        ("\u{1b}[H\u{1b}[3X", false),
+        ("\u{1b}[1;5Hx", false),
+        ("\u{1b}[1;5H\u{e9}", false),
+        ("\u{1b}[1;21Hx", true),
+        ("\u{1b}[1;21H\u{1b}[K", true),
+    ])
+    func testWritingOverImageColumnsErasesIt(input: String, kept: Bool) {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 25))
+        terminal.buffer.attachImage(MockTerminalImage(col: 0, cols: 10), toLineAt: 0)
+        terminal.feed(text: input)
+        #expect((terminal.buffer.lines[0].images != nil) == kept)
+        #expect(terminal.buffer.hasAnyImages == kept)
     }
 }
 #endif

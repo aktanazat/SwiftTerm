@@ -237,6 +237,23 @@ public final class Buffer {
         }
     }
 
+    /// Takes the sixel and inline images off the line at `index` where they cover any of `columns`:
+    /// text or an erase there replaces them, as in xterm, and tmux repaints its images on that rule.
+    /// Kitty placements sit on their own layer and stay.
+    func eraseImages(onLineAt index: Int, columns: Range<Int>) {
+        let line = lines[index]
+        guard let images = line.images else { return }
+        let kept = images.filter { image in
+            (image as? KittyPlacementImage)?.kittyIsKitty == true
+                || image.col + image.cols <= columns.lowerBound || image.col >= columns.upperBound
+        }
+        guard kept.count < images.count else { return }
+        line.images = kept.isEmpty ? nil : kept
+        if kept.isEmpty {
+            _linesWithImagesCount -= 1
+        }
+    }
+
     /// Recalculates the count of lines with images (used after reflow operations)
     func recalculateLinesWithImagesCount() {
         var count = 0
@@ -1607,6 +1624,9 @@ public final class Buffer {
             let available = right - _x + 1
             let runLen = min(available, bytes.endIndex - idx)
             let row = _lines[_y + _yBase]
+            if row.images != nil {
+                eraseImages(onLineAt: _y + _yBase, columns: _x..<(_x + runLen))
+            }
             if !didResolvePayload {
                 payload = resolvePayload()
                 didResolvePayload = true
@@ -1687,6 +1707,9 @@ public final class Buffer {
         // Write current char to buffer and advance cursor.
         if _x >= _cols {
             _x = _cols-1
+        }
+        if bufferRow.images != nil {
+            eraseImages(onLineAt: _y + _yBase, columns: _x..<(_x + chWidth))
         }
         charData.setPayload(atom: resolvePayload() ?? TinyAtom.empty)
         bufferRow[_x] = charData
