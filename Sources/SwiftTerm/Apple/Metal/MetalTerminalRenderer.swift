@@ -2762,21 +2762,29 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         return (colorVertices, glyphVerticesGray, glyphVerticesColor)
     }
 
+    /// Where the rows of an image stripe start. On iOS and visionOS `drawImageInStripe` draws each stripe
+    /// upside down, for the Core Graphics renderer's flipped context, so its rows already run bottom up.
+    #if os(iOS) || os(visionOS)
+    private static let stripeOrigin = MTKTextureLoader.Origin.topLeft
+    #else
+    private static let stripeOrigin = MTKTextureLoader.Origin.bottomLeft
+    #endif
+
     private func texture(for image: TerminalView.AppleImage) -> MTLTexture? {
         if let cached = imageTextureCache.object(forKey: image) {
             return cached
         }
         var texture: MTLTexture?
         if let cgImage = cgImage(from: image.image) {
-            texture = try? textureLoader.newTexture(cgImage: cgImage, options: textureOptions())
+            texture = try? textureLoader.newTexture(cgImage: cgImage, options: textureOptions(origin: Self.stripeOrigin))
         }
         #if os(macOS)
         if texture == nil, let data = image.image.tiffRepresentation {
-            texture = try? textureLoader.newTexture(data: data, options: textureOptions())
+            texture = try? textureLoader.newTexture(data: data, options: textureOptions(origin: Self.stripeOrigin))
         }
         #else
         if texture == nil, let data = image.image.pngData() {
-            texture = try? textureLoader.newTexture(data: data, options: textureOptions())
+            texture = try? textureLoader.newTexture(data: data, options: textureOptions(origin: Self.stripeOrigin))
         }
         #endif
         if let texture {
@@ -2877,10 +2885,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         #endif
     }
 
-    private func textureOptions() -> [MTKTextureLoader.Option: Any] {
+    private func textureOptions(origin: MTKTextureLoader.Origin = .bottomLeft) -> [MTKTextureLoader.Option: Any] {
         return [
             .SRGB: false,
-            .origin: MTKTextureLoader.Origin.bottomLeft
+            .origin: origin
         ]
     }
 
